@@ -22,7 +22,7 @@ What the first run does (each step is skipped when it is already done):
 Uncensored models (this fork): --family orca (gated: a Hugging Face token), mrad or rvn - community GGUFs of
 refusal-removed builds, each with its own sizes (orca IQ2_M is the one that fits 64 GB of RAM).
 
-Options: --family qwen|swift|orca|mrad|rvn, --model Q2_0|IQ2_XS|IQ3_XXS (or the family's size), --context 32768, --vision yes|no|gpu|cpu, --port 8080, --yes (recommended
+Options: --family qwen|swift|orca|mrad|rvn, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S (or the family's size), --context 32768, --vision yes|no|gpu|cpu, --port 8080, --yes (recommended
 answers, no questions), --setup (install another model / change settings instead of starting), --no-start,
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile instead of the ready-made
 engine), --check (only check this PC).
@@ -58,15 +58,19 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 2)                 # split models (Swift 1.5), STOP, cache sized after the slots are written
+MIN_ENGINE = (0, 1, 6)                 # KV streaming (--kv-resident), v0.1.5; its drafter fallback, v0.1.6
 PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow"]
 
 MODELS = {
     "Q2_0": {"about": "2-bit, the fastest", "download_gb": 66.4, "ram_gb": 48, "arena_gb": 34.0},
     "IQ2_XS": {"about": "2-bit i-quant, a little better quality, close in speed", "download_gb": 68.0, "ram_gb": 48,
                "arena_gb": 35.5},
-    "IQ3_XXS": {"about": "3-bit i-quant, the best quality, slower (more CPU work per token)", "download_gb": 75.8,
+    "IQ3_XXS": {"about": "3-bit i-quant, better quality, slower (more CPU work per token)", "download_gb": 75.8,
                 "ram_gb": 60, "arena_gb": 42.9},
+    # the original model only (Swift 1.5 has no IQ3_S): matches the full BF16 model on the published benchmarks
+    "IQ3_S": {"about": "3.5-bit i-quant, the best quality (matches the full model), the slowest; needs a 64 GB PC "
+                       "with little else running", "download_gb": 83.6, "ram_gb": 62, "arena_gb": 50.3,
+              "families": ("qwen",)},
 }
 CONTEXTS = [8192, 32768, 65536, 131072, 262144]
 # The model families: the same architecture, weights in the same three GSQ-RCO sizes, different files.
@@ -537,6 +541,42 @@ def get_prebuilt(url_base, gpu, vision) -> Path | None:
     return eng
 
 
+def update_installed_engine(url_base) -> None:
+    """An installed ready-made engine older than MIN_ENGINE is replaced before the model starts, so a plain
+    START-HERE.bat on an existing install picks up a new release.  If that cannot happen (no internet, the model
+    still running, no ready-made engine for this GPU) the installed engine is kept and starts as before."""
+    eng = ROOT / "engine"
+    info = eng / "BUILD.json"
+    if not info.exists() or not (eng / EXE).exists():
+        return
+    meta_text = info.read_text()
+    meta = json.loads(meta_text)
+    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
+    if meta.get("source") == "local" or ver >= MIN_ENGINE:
+        return
+    try:                                               # a running engine cannot be replaced (Windows keeps it locked)
+        for x in (EXE, VEXE):
+            if (eng / x).exists():
+                with open(eng / x, "r+b"):
+                    pass
+    except OSError:
+        warn(f"engine {meta.get('version')} is in use: close the model window and run this again to update it")
+        return
+    gpu = gpu_info()
+    new = None
+    if gpu is not None:
+        try:
+            new = get_prebuilt(url_base, gpu, "gpu")
+        except Exception as e:                         # a failed download must not stop the model from starting
+            warn(f"updating the engine failed ({e})")
+    if new is None:
+        if not info.exists():
+            info.write_text(meta_text)                 # get_prebuilt drops it before downloading: put it back
+        warn(f"could not update the engine: starting the installed {meta.get('version')}")
+        return
+    pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
+
+
 def install_build_tools(gpu, yes):
     """The compiler and the CUDA toolkit, installed for the user (asks once).  Returns (nvcc, vcvars)."""
     nvcc, cuda_v = find_nvcc()
@@ -709,6 +749,8 @@ def main() -> int:
     # ---- 0. already installed: just start it
     have = installed_configs()
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
+        if not a.build:
+            update_installed_engine(a.prebuilt)
         if len(have) == 1:
             return start(have[0], None)
         say()
@@ -766,14 +808,14 @@ def main() -> int:
         say(f"  Gated model: downloading it needs a Hugging Face account that accepted its terms on {fam['gated']}")
         say("  and a token (HF_TOKEN, `hf auth login`, or pasted when asked).")
     say()
-    sizes = fam.get("sizes", MODELS)
+    sizes = fam.get("sizes") or {m: d for m, d in MODELS.items() if family in d.get("families", FAMILIES)}
     names = list(sizes)
     for i, m in enumerate(names, 1):
         d = sizes[m]
         fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
         say(f"  {i}) {m:8s} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
-    rec = "3" if ram >= 60 else "1"
-    if sizes is not MODELS:                            # the biggest that fits, else the smallest
+    rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 else "1"
+    if "sizes" in fam:                                 # the biggest that fits, else the smallest
         rec = str(max([i for i, m in enumerate(names, 1) if ram >= sizes[m]["ram_gb"]] or [1]))
     if a.model and a.model not in sizes:
         fail(f"{fam['title']} has no size {a.model}", "choose one of: " + ", ".join(names))
@@ -793,8 +835,9 @@ def main() -> int:
         for i, c in enumerate(CONTEXTS, 1):
             say(f"  {i}) {c // 1024}K tokens" + ("   (recommended for your GPU)" if c == rec_ctx else ""))
         ctx = CONTEXTS[int(ask("Context?", [str(i) for i in range(1, 6)], str(CONTEXTS.index(rec_ctx) + 1), a.yes)) - 1]
-    if model == "IQ3_XXS" and ram < 90 and ctx > 131072:
-        warn("IQ3_XXS with a 262K context needs more than 64 GB of RAM (43 GB of experts + the context): using 128K")
+    if model in ("IQ3_XXS", "IQ3_S") and ram < 90 and ctx > 131072:
+        warn(f"{model} with a 262K context needs more than 64 GB of RAM ({sizes[model]['arena_gb']:.0f} GB of experts "
+             "+ the context): using 128K")
         ctx = 131072
     ok(f"context: {ctx} tokens")
     if a.vision:
@@ -917,6 +960,13 @@ def main() -> int:
             "--max-context", str(ctx)]
     if ctx > 8192:
         args += ["--kv", "int8"]
+    # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
+    # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
+    # costs ~13.7 KB of RAM per context token (1.7 GB at 128K, 3.4 GB at 262K), so only when that fits.
+    kv_ram_gb = ctx * 13728 / 1e9
+    if ctx >= 65536 and ram >= sizes[model]["ram_gb"] + kv_ram_gb + 1:
+        args += ["--kv-resident", "32768"]
+        ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
