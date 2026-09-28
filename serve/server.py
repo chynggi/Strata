@@ -10,6 +10,7 @@ data, http(s) URLs or local file paths) go through `strata-vision` (the model's 
 embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
 converted to PNG first with Pillow.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
+An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
 
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel) -> iterator of token ids`.
 `StrataEngine` keeps one `strata --serve` process resident (weights, expert arena and VRAM tier load once) and
@@ -18,6 +19,7 @@ talks to it over stdin/stdout; `MockEngine` is a scripted stand-in that makes ev
 from __future__ import annotations
 
 import argparse
+import collections
 import base64
 import hashlib
 import json
@@ -42,6 +44,7 @@ from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_mess
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
+CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -69,19 +72,40 @@ class MockEngine:
             yield t
 
 
+class EngineDied(RuntimeError):
+    """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
-    `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough."""
+    `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
+
+    Per-request sampling rides the same line as engine-side keys between max_new and the ids
+    (`temperature=F top_p=F top_k=N seed=N`, the engine's own spelling).  An absent temperature keeps the
+    engine's default, which is greedy; `temperature=0` means the same thing, so it is not forwarded.
+    """
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None):
+        self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
+        self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         self.max_context = 0
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.last = {}
+        self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
+        self.progress = None             # (read, total) prompt tokens while a prompt is read, from PP lines
+        try:                             # a ready-made engine's BUILD.json says its version
+            self.info["version"] = json.loads((Path(exe).parent / "BUILD.json").read_text()).get("version")
+        except (OSError, ValueError):
+            self.info["version"] = None
         for line in self.proc.stdout:
+            if line.startswith("INFO "):
+                for kv in line.split()[1:]:
+                    k, _, v = kv.partition("=")
+                    self.info[k] = int(v) if v.lstrip("-").isdigit() else v
             if line.startswith("READY"):
                 f = line.split()
                 self.max_context = int(f[1])
@@ -96,20 +120,112 @@ class StrataEngine:
     def _pump(self):
         for line in self.proc.stdout:
             self.lines.put(line)
+        self.ended = True                               # its output closed: it is gone, even before the OS says so
         self.lines.put(None)
+
+    def death_note(self) -> str:
+        """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
+        tail = ""
+        try:
+            with open(self.log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4096))
+                tail = f.read().decode("utf-8", "replace")
+        except (OSError, TypeError):
+            pass
+        for line in reversed(tail.splitlines()):
+            if "issue #29" in line:
+                return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
+                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+        return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
+                "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
+                "smaller model (Q2_0 / IQ2_XS).")
+
+    def alive(self) -> bool:
+        return not getattr(self, "ended", False) and self.proc.poll() is None
+
+    def exit_code(self):
+        try:
+            return self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def restart(self):
+        """Start the engine again (the same command) after it died; the new process has its own line queue."""
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
+        info = dict(self.info)
+        self.ended = False
+        self.__init__(*self.spawn)
+        self.info = {**info, **self.info}
 
     def _parse_done(self, line):
         f = line.split()
         self.last = {"generated": int(f[1]), "prompt_tokens": int(f[2]), "prompt_ms": float(f[3]),
                      "decode_ms": float(f[4]), "finish": f[5]}
+        if len(f) >= 9:                                   # the conversation cache's fields (engine 0.1.3+)
+            self.last.update(drafts_accepted=int(f[6]), drafts_offered=int(f[7]), reused=int(f[8]))
+
+    @staticmethod
+    def sampling_keys(sampling: dict) -> str:
+        keys = ""
+        t = sampling.get("temperature")
+        if isinstance(t, (int, float)) and float(t) > 0.0:
+            keys += f" temperature={float(t)!r}"
+        tp = sampling.get("top_p")
+        if isinstance(tp, (int, float)) and float(tp) < 1.0:
+            keys += f" top_p={float(tp)!r}"
+        tk = sampling.get("top_k")
+        if isinstance(tk, int) and 1 <= tk <= 64:
+            keys += f" top_k={tk}"        # the engine's sampled path takes 1..64; outside it keeps its 20
+        mp = sampling.get("min_p")
+        if isinstance(mp, (int, float)) and 0.0 < float(mp) <= 1.0:
+            keys += f" min_p={float(mp)!r}"
+        rp = sampling.get("repetition_penalty")
+        rp_on = isinstance(rp, (int, float)) and float(rp) != 1.0
+        pf = sampling.get("frequency_penalty")
+        pf_on = isinstance(pf, (int, float)) and float(pf) != 0.0
+        pp = sampling.get("presence_penalty")
+        pp_on = isinstance(pp, (int, float)) and float(pp) != 0.0
+        if rp_on:
+            keys += f" penalty_repeat={float(rp)!r}"
+        if pf_on:
+            keys += f" penalty_freq={float(pf)!r}"
+        if pp_on:
+            keys += f" penalty_present={float(pp)!r}"
+        if rp_on or pf_on or pp_on:
+            # a penalty without a window counts over nothing: the engine's default is the last 64 tokens
+            pln = sampling.get("penalty_last_n")
+            if isinstance(pln, int) and not isinstance(pln, bool) and pln > 0:
+                keys += f" penalty_last_n={pln}"
+            else:
+                keys += " penalty_last_n=64"
+        seed = sampling.get("seed")
+        if isinstance(seed, int) and seed > 0:
+            keys += f" seed={seed}"
+        return keys + StrataEngine.projection_key(sampling)
+
+    @staticmethod
+    def projection_key(sampling: dict) -> str:
+        """`cvec=0|1`: the experimental-speed-projection control vector for this request, when the engine was
+        started with one (--control-vector-scaled; an engine without one ignores the key).  Absent = on."""
+        on = sampling.get("experimental_speed_projection")
+        return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
         the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
         has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
-        head = f"GENI {int(max_new)} {embeddings}" if embeddings else f"GEN {int(max_new)}"
-        self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
-        self.proc.stdin.flush()
+        self.progress = None
+        head = f"GENI {int(max_new)}{self.projection_key(sampling or {})} {embeddings}" if embeddings else \
+            f"GEN {int(max_new)}{self.sampling_keys(sampling or {}) if not embeddings else ''}"
+        try:
+            self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
+            self.proc.stdin.flush()
+        except OSError:                                  # the pipe is gone: the engine died (not the client)
+            raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         done = False
         try:
             while True:
@@ -122,12 +238,15 @@ class StrataEngine:
                     continue
                 if line is None:
                     done = True
-                    raise RuntimeError("the engine process ended")
+                    raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
                 if line.startswith("T "):
                     if cancel.is_set():
                         return
                     yield int(line[2:])
-                elif line.startswith("PP "):             # prompt progress, one per chunk: also a heartbeat (the
+                elif line.startswith("PP "):
+                    f = line.split()
+                    if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
+                        self.progress = (int(f[1]), int(f[2]))             # prompt progress, one per chunk: also a heartbeat (the
                     if cancel.is_set():                   # lines reset the 10 s wait, so without this a long prompt
                         return                            # would send no keep-alives at all)
                     yield None
@@ -311,17 +430,101 @@ class Detokenizer:
 
 class Service:
     def __init__(self, engine: Engine, tokenizer, template: ChatTemplate, model_name: str = "qwen3.8-flash-next",
-                 vision: Vision | None = None):
+                 vision: Vision | None = None, sampling_defaults: dict | None = None,
+                 fit_max_tokens: bool = False):
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
+        self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
+        self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
+        self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
+        self.shared_path = None                       # where they are kept between starts (next to the config)
         self.fifo = threading.Lock()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
+        self.history = collections.deque(maxlen=30)     # the last finished requests, newest last (GET /metrics)
         self.status_lock = threading.Lock()
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
 
-    def prepare(self, messages, tools, kwargs, max_new):
+    def set_shared(self, defaults) -> dict:
+        """The Chat settings every client gets for what it leaves out; {} / None = clients use their own again."""
+        self.shared = clean_shared_defaults(defaults)
+        if self.shared_path:
+            try:
+                if self.shared:
+                    Path(self.shared_path).write_text(json.dumps(self.shared, indent=1), encoding="utf-8")
+                else:
+                    Path(self.shared_path).unlink(missing_ok=True)
+            except OSError as e:
+                print(f"[strata] could not save the shared settings: {e}", flush=True)
+        return self.shared
+
+    def with_shared(self, req: dict, api: str) -> dict:
+        """The request with the shared thinking level and max tokens filled in where it has none of its own."""
+        s = self.shared
+        if not s:
+            return req
+        req = dict(req)
+        if "max_tokens" in s and not req.get("max_tokens") and not req.get("max_completion_tokens"):
+            req["max_tokens"] = s["max_tokens"]
+        effort = s.get("reasoning_effort")
+        if effort:
+            if api == "openai":
+                ctk = req.get("chat_template_kwargs") if isinstance(req.get("chat_template_kwargs"), dict) else {}
+                if not req.get("reasoning_effort") and not req.get("reasoning") and \
+                        "enable_thinking" not in ctk and "reasoning_effort" not in ctk:
+                    req["reasoning_effort"] = effort
+            elif not req.get("thinking") and not req.get("output_config"):
+                if effort == "none":
+                    req["thinking"] = {"type": "disabled"}
+                else:
+                    req["output_config"] = {"effort": effort}
+        return req
+
+    def start_telemetry(self):
+        """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
+        if getattr(self, "telemetry", None) is None:
+            from serve.telemetry import Telemetry
+            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()})
+
+    def _tok_s(self):
+        with self.status_lock:
+            s = dict(self.status)
+        if not s.get("busy") or not s.get("first_token"):
+            return 0.0
+        return s["generated"] / max(1e-6, time.time() - s["first_token"])
+
+    def metrics(self) -> dict:
+        """GET /metrics: what the Monitor tab shows - the engine's facts, what it is doing, the last requests, and
+        the hardware (with a minute of history per series)."""
+        with self.status_lock:
+            s = dict(self.status)
+            hist = list(self.history)
+        now = time.time()
+        progress = getattr(self.engine, "progress", None)
+        if s.get("busy") and s.get("first_token") is None:
+            state = "reading"
+        elif s.get("busy"):
+            state = "generating"
+        else:
+            state = "idle"
+        live = {"state": state, "queued": s.get("queued", 0), "phase": s.get("phase") if s.get("busy") else None,
+                "prompt_tokens": s.get("prompt_tokens") if s.get("busy") else None,
+                "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
+                "max_tokens": s.get("max_tokens") if s.get("busy") else None,
+                "elapsed_s": round(now - s["started"], 1) if s.get("busy") and s.get("started") else None,
+                "tok_s": round(self._tok_s(), 1) if state == "generating" else None}
+        if state == "reading" and progress:
+            live["prompt_read"], live["prompt_total"] = progress
+        engine = {"model": self.model, "max_context": self.engine.max_context, "images": self.vision is not None,
+                  **dict(getattr(self.engine, "info", {}) or {})}
+        tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
+        return {"engine": engine, "live": live, "requests": hist[::-1], "hardware": tel["now"], "hardware_static":
+                tel["static"], "history": tel["history"], "time": now}
+
+    def prepare(self, messages, tools, kwargs, max_new=None):
+        """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
+        the rest of the context."""
         prompt = self.template.render(messages, tools=tools, **kwargs)
         ids = self.tok.encode(prompt, parse_special=True)
         self.embeddings.path = None
@@ -352,10 +555,18 @@ class Service:
                 for path, _ in encoded:
                     f.write(path.read_bytes())
             self.embeddings.path = combined
-        if len(ids) + max_new > self.engine.max_context:
-            raise ValueError(f"prompt ({len(ids)} tokens) + max tokens ({max_new}) exceeds the context "
-                             f"({self.engine.max_context}); requests are never truncated")
-        return ids, kwargs.get("enable_thinking", True) is not False
+        room = self.engine.max_context - CTX_SLACK - len(ids)
+        if max_new is None or max_new <= 0 or (self.fit_max_tokens and room < 1):
+            if room < 1:
+                raise ValueError(f"prompt ({len(ids)} tokens) leaves no room to answer in the context "
+                                 f"({self.engine.max_context}); requests are never truncated")
+            max_new = room
+        elif max_new > room:
+            if not self.fit_max_tokens:
+                raise ValueError(f"prompt ({len(ids)} tokens) + max tokens ({max_new}) exceeds the context "
+                                 f"({self.engine.max_context}); requests are never truncated")
+            max_new = max(1, room)          # --fit-max-tokens: a shorter completion beats a 400
+        return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
     def _note(self, n, evs):
         with self.status_lock:
@@ -392,6 +603,10 @@ class Service:
 
     def run(self, ids, thinking, tools, max_new, sampling, cancel) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..})."""
+        defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
+        if defaults:                   # the request's own fields win (explicit 0 stays greedy)
+            req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
+            sampling = {**defaults, **req_values}
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
@@ -402,6 +617,14 @@ class Service:
             with self.fifo:
                 with self.status_lock:
                     self.status["queued"] -= 1
+                if hasattr(self.engine, "alive") and not self.engine.alive():
+                    # issue #27: it died in an earlier request - start it again instead of failing every request
+                    code = self.engine.exit_code() if hasattr(self.engine, "exit_code") else None
+                    print(f"[strata] the engine had stopped (exit code {code}); starting it again "
+                          "(a minute or two) ...", flush=True)
+                    self.engine.restart()
+                    print("[strata] the engine is running again", flush=True)
+                with self.status_lock:
                     self.status.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids), generated=0,
                                        started=time.time(), first_token=None, tool=None, tail="", max_tokens=max_new)
                 last_print = time.time()
@@ -426,6 +649,13 @@ class Service:
                             yield "event", ev
                     if cancel.is_set():
                         finish = "cancel"
+                except EngineDied as e:
+                    finish = "error"
+                    note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
+                    print(f"[strata] {e}. {note} The next request starts the engine again."
+                          f"{' Its log: ' + self.engine.log_path if getattr(self.engine, 'log_path', None) else ''}",
+                          flush=True)
+                    raise
                 finally:
                     gen.close()                         # STOP+drain to THIS request's DONE while still holding the
                     #                                     fifo, so a stop-token break can't leave the shared engine
@@ -438,6 +668,17 @@ class Service:
                 Path(emb).unlink(missing_ok=True)
             with self.status_lock:
                 if self.status.get("busy"):
+                    last = dict(getattr(self.engine, "last", {}) or {})
+                    started = self.status.get("started", time.time())
+                    loaded = str((getattr(self.engine, "info", {}) or {}).get("cvec", 0)) not in ("0", "", "None")
+                    self.history.append({
+                        "projection": (sampling or {}).get("experimental_speed_projection") is not False
+                        if loaded else None,
+                        "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
+                        "prompt_tokens": len(ids), "reused": last.get("reused"), "output_tokens": n,
+                        "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
+                        "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
+                        if n and last.get("generated") and last.get("decode_ms") else None})
                     now = time.time()
                     el = now - self.status.get("started", now)
                     ft = self.status.get("first_token")
@@ -654,8 +895,49 @@ def make_handler(svc: Service):
 
         def do_GET(self):
             path = self.path.split("?")[0].rstrip("/")
+            if path.startswith("/fonts/"):
+                # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
+                name = path[len("/fonts/"):]
+                f = ROOT / "serve" / "web" / "fonts" / name
+                if "/" in name or "\\" in name or not name.endswith(".woff2") or not f.is_file():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return
+                body = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "font/woff2")
+                self.send_header("Cache-Control", "max-age=86400")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path.startswith("/web/"):
+                # the web app's own files (serve/web): styles, script, icon sprite - same origin, no CDN
+                name = path[len("/web/"):]
+                types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                         ".svg": "image/svg+xml"}
+                f = ROOT / "serve" / "web" / name
+                ext = os.path.splitext(name)[1]
+                if "/" in name or "\\" in name or ext not in types or not f.is_file():
+                    self._json(404, {"error": {"message": "not found"}})
+                    return
+                body = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", types[ext])
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/metrics":
+                if self._authorized():
+                    self._json(200, svc.metrics())
+                return
+            if path == "/settings":
+                if self._authorized():
+                    self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
+                return
             if path == "":
-                body = (ROOT / "serve" / "index.html").read_bytes()
+                body = (ROOT / "serve" / "web" / "index.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -684,6 +966,9 @@ def make_handler(svc: Service):
         def do_POST(self):
             if not self._authorized():
                 return
+            if self.path.rstrip("/") == "/settings":
+                self._settings()
+                return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 if self.path.rstrip("/") == "/v1/chat/completions":
@@ -694,6 +979,30 @@ def make_handler(svc: Service):
                     self._json(404, {"error": {"message": "not found"}})
             except ValueError as e:
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+            except EngineDied as e:                          # before the answer started (not streamed)
+                self._json(503, {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}})
+
+        def _settings(self):
+            # They change what every client gets, so only the app's own page may set them: JSON only (a form or a
+            # "simple" cross-site request can't send it without a CORS preflight, which this server never grants),
+            # and no foreign Origin
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                self._json(415, {"error": {"message": "send application/json"}})
+                return
+            origin = self.headers.get("Origin")
+            if origin and origin.split("://", 1)[-1] != self.headers.get("Host", ""):
+                self._json(403, {"error": {"message": "settings can only be changed from Strata's own page"}})
+                return
+            try:
+                req = json.loads(body or b"{}")
+                shared = svc.set_shared(req.get("defaults") if isinstance(req, dict) else None)
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                return
+            print("[strata] other apps now use the Chat settings: " + ", ".join(f"{k}={v}" for k, v in shared.items())
+                  if shared else "[strata] other apps use their own settings again", flush=True)
+            self._json(200, {"shared": bool(shared), "defaults": shared})
 
         def _sse(self):
             self.send_response(200)
@@ -702,11 +1011,10 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _openai(self, req):
+            req = svc.with_shared(req, "openai")
             messages, tools, kw = openai_to_messages(req)
-            max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 1024)
-            if max_new <= 0:                             # a non-positive budget (some clients send -1) means "unset"
-                max_new = 1024
-            ids, thinking = svc.prepare(messages, tools, kw, max_new)
+            max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest of the context
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel)
@@ -724,13 +1032,15 @@ def make_handler(svc: Service):
             except OSError:
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
+            except EngineDied as e:                          # mid-stream: say so, then end the stream properly
+                err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _anthropic(self, req):
+            req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req)
-            max_new = int(req.get("max_tokens") or 1024)
-            if max_new <= 0:                             # a non-positive budget (some clients send -1) means "unset"
-                max_new = 1024
-            ids, thinking = svc.prepare(messages, tools, kw, max_new)
+            max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new)
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             cancel = threading.Event()
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
@@ -749,6 +1059,9 @@ def make_handler(svc: Service):
             except OSError:
                 cancel.set()
                 events.close()
+            except EngineDied as e:                          # mid-stream: Anthropic's error event
+                err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
+                self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
     return Handler
 
@@ -759,10 +1072,148 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
 
+def warn_tight_ram(arena_mib) -> None:
+    """The model's experts live in RAM (INFO arena_mib, engine 0.1.10+).  With less than ~6 GB left beside them for the
+    system, the engine and this server, Linux ends the engine mid-answer when memory runs out (issue #27) and Windows
+    pages to disk; say so at start instead of after a lost answer."""
+    if not isinstance(arena_mib, int) or arena_mib <= 0:
+        return
+    try:
+        import psutil
+        total = psutil.virtual_memory().total
+    except Exception:  # noqa: BLE001 - psutil is optional here
+        return
+    left = total / 2**30 - arena_mib / 1024
+    if left < 6:
+        print(f"[strata] WARNING: RAM is tight - the model's experts take {arena_mib / 1024:.1f} GB of this PC's "
+              f"{total / 2**30:.0f} GB, leaving {left:.1f} GB for everything else. "
+              + ("Linux may stop the engine in the middle of an answer. " if os.name != "nt" else
+                 "Windows will slow down (paging to disk). ")
+              + "Close other programs, or run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS).", flush=True)
+
+
+def lan_addresses() -> list[str]:
+    """This PC's IPv4 addresses on its networks (what another device types in), without loopback/link-local."""
+    import socket
+    first, ips = None, set()
+    try:                                                # the address of the default route; sends nothing (UDP)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            first = s.getsockname()[0]
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    ok = lambda ip: ip and not ip.startswith(("127.", "169.254.", "0."))
+    return ([first] if ok(first) else []) + sorted(ip for ip in ips if ok(ip) and ip != first)
+
+
 def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
+    svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
+
+
+SHARED_KEYS = ("reasoning_effort", "temperature", "top_p", "top_k", "seed", "max_tokens", "experimental_speed_projection")
+
+
+def clean_shared_defaults(d) -> dict:
+    """The Chat settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
+    if d is None:
+        return {}
+    if not isinstance(d, dict):
+        raise ValueError("defaults must be an object")
+    out = {}
+    for key, value in d.items():
+        if value is None or value == "":
+            continue
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if key == "reasoning_effort":
+            if value not in ("none", "low", "medium", "high"):
+                raise ValueError("reasoning_effort: none, low, medium or high")
+        elif key == "temperature":
+            if not number or not 0 <= value <= 2:
+                raise ValueError("temperature: 0..2")
+        elif key == "top_p":
+            if not number or not 0 < value <= 1:
+                raise ValueError("top_p: 0 < top_p <= 1")
+        elif key == "top_k":
+            if not number or value != int(value) or not 1 <= value <= 64:
+                raise ValueError("top_k: an integer 1..64")
+            value = int(value)
+        elif key in ("seed", "max_tokens"):
+            if not number or value != int(value) or value <= 0:
+                raise ValueError(f"{key}: a positive integer")
+            value = int(value)
+        elif key == "experimental_speed_projection":
+            if not isinstance(value, bool):
+                raise ValueError("experimental_speed_projection: true or false")
+        else:
+            raise ValueError(f"unknown setting {key!r}")
+        out[key] = float(value) if key in ("temperature", "top_p") else value
+    return out
+
+
+def sampling_defaults_from_config(cfg: dict) -> dict:
+    """The run config's optional `sampling` block: defaults for the sampling fields a request leaves out, so
+    a plain client gets configured sampling instead of greedy.  Supported: temperature, top_p, top_k, min_p,
+    presence_penalty, repetition_penalty, frequency_penalty, penalty_last_n, seed.  The request's own fields
+    always win - an explicit temperature=0 still means greedy, a field set to null falls back to the default.
+    A bad value refuses to start the server (a typo'd config should not quietly change sampling); unknown keys
+    are named at startup and ignored."""
+    out = {}
+    for key, value in (cfg.get("sampling") or {}).items():
+        if value is None:
+            continue
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if key == "temperature":
+            if not number or value < 0:
+                raise SystemExit(f"[strata] config sampling.temperature={value!r}: expected a number >= 0 (0 = greedy)")
+            out[key] = float(value)
+        elif key == "top_p":
+            if not number or not 0 < value <= 1:
+                raise SystemExit(f"[strata] config sampling.top_p={value!r}: expected 0 < top_p <= 1")
+            out[key] = float(value)
+        elif key == "min_p":
+            if not number or not 0 <= value <= 1:
+                raise SystemExit(f"[strata] config sampling.min_p={value!r}: expected 0 <= min_p <= 1")
+            out[key] = float(value)
+        elif key == "top_k":
+            if not number or value != int(value) or not 1 <= value <= 64:
+                raise SystemExit(f"[strata] config sampling.top_k={value!r}: the sampled path takes an integer 1..64")
+            out[key] = int(value)
+        elif key == "presence_penalty":
+            if not number or value < 0:
+                raise SystemExit(f"[strata] config sampling.presence_penalty={value!r}: expected a number >= 0")
+            out[key] = float(value)
+        elif key == "frequency_penalty":
+            if not number or value < 0:
+                raise SystemExit(f"[strata] config sampling.frequency_penalty={value!r}: expected a number >= 0")
+            out[key] = float(value)
+        elif key == "repetition_penalty":
+            if not number or value <= 0:
+                raise SystemExit(f"[strata] config sampling.repetition_penalty={value!r}: expected a number > 0 (1 = off)")
+            out[key] = float(value)
+        elif key == "penalty_last_n":
+            if not number or value != int(value) or value < 0:
+                raise SystemExit(f"[strata] config sampling.penalty_last_n={value!r}: expected a non-negative integer")
+            out[key] = int(value)
+        elif key == "seed":
+            if not number or value != int(value) or value <= 0:
+                raise SystemExit(f"[strata] config sampling.seed={value!r}: expected a positive integer")
+            out[key] = int(value)
+        elif key == "experimental_speed_projection":
+            if not isinstance(value, bool):
+                raise SystemExit(f"[strata] config sampling.experimental_speed_projection={value!r}: expected true or "
+                                 "false (the default for requests that leave it out, when the engine has the vector)")
+            out[key] = value
+        else:
+            print(f"[strata] config sampling.{key}={value!r}: unknown key, ignored", flush=True)
+    return out
 
 
 def main() -> int:
@@ -770,16 +1221,22 @@ def main() -> int:
     ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
     ap.add_argument("--config", help="strata engine config (JSON: exe, args, cwd, tokenizer, model_name), "
                                      "written by setup.py")
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default=None,
+                    help="the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices "
+                         "on your network (set an API key); also \"host\" in the config")
     ap.add_argument("--script", default="Thinking about it.</think>\n\nHello from the mock engine.")
     ap.add_argument("--port", type=int, default=8095)
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
                     help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
     ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
+    ap.add_argument("--fit-max-tokens", action="store_true",
+                    help="clamp max_tokens to the remaining context instead of rejecting the request "
+                         "(default: reject with 400, like llama.cpp; also \"fit_max_tokens\": true in the config)")
     ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY", ""),
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
     except OSError:
@@ -805,24 +1262,56 @@ def main() -> int:
             ap.error("--engine strata needs --config")
         vision = None
         env = child_env(cfg)
+        sampling_defaults = sampling_defaults_from_config(cfg)
+        if sampling_defaults:
+            pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
+            print(f"[strata] sampling defaults from the config: {pretty}", flush=True)
         if cfg.get("vision"):
             print("loading the vision encoder ...", flush=True)
             vision = Vision(cfg["vision"], log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
                             env=env)
         print("loading the model (the first start takes a minute or two) ...", flush=True)
         engine = StrataEngine(cfg["exe"], cfg["args"], cwd=cfg.get("cwd"), log=cfg.get("log"), env=env)
+        warn_tight_ram(engine.info.get("arena_mib"))
     else:
-        engine, vision = MockEngine(tok, a.script), None
+        engine, vision, sampling_defaults = MockEngine(tok, a.script), None, {}
     # the model's own chat template (exported with its tokenizer), else the original model's
     tpl = tpath / "chat_template.jinja"
     svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
-                  model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision)
+                  model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
+                  sampling_defaults=sampling_defaults,
+                  fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    if a.config:                                        # the Chat settings shared with other apps, from last time
+        svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
+        try:
+            svc.shared = clean_shared_defaults(json.loads(Path(svc.shared_path).read_text(encoding="utf-8")))
+            if svc.shared:
+                print("[strata] other apps use the Chat settings: " +
+                      ", ".join(f"{k}={v}" for k, v in svc.shared.items()), flush=True)
+        except (OSError, ValueError):
+            svc.shared = {}
     httpd = serve(svc, host=a.host, port=a.port)
-    print(f"ready: http://{a.host}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
+    here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
+    print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
           f"{', API key required' if svc.api_key else ''})", flush=True)
-    print(f"       open http://{a.host}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
+    print(f"       open http://{here}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
+    if a.host not in ("127.0.0.1", "localhost", "::1"):
+        # issue #26: reachable from other devices - say at which address, and what can still block it
+        ips = lan_addresses()
+        for ip in ips:
+            print(f"       from other devices: http://{ip}:{a.port}/   (API: http://{ip}:{a.port}/v1)", flush=True)
+        if not ips:
+            print("       from other devices: http://<this PC's IP address>:" + str(a.port) + "/", flush=True)
+        if not svc.api_key:
+            print("       WARNING: no API key - anyone on your network can use this model. Add \"api_key\": \"...\" "
+                  "to the config (clients send it as their API key; the web page asks for it)", flush=True)
+        if os.name == "nt":
+            print("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for Python, or run "
+                  "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Strata " + str(a.port) + "\" "
+                  "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
+                  "       (and set this network to Private in Windows' network settings)", flush=True)
     if a.open:
         import webbrowser
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")

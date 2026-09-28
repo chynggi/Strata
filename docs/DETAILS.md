@@ -42,6 +42,11 @@ attention reads in VRAM (`--kv-resident 32768`), so more experts fit on the GPU.
 costs ~13.7 KB of RAM per context token (1.7 GB at 128K). Existing installs: run `START-HERE.bat --setup` once to turn
 it on.
 
+**4-bit KV cache (engine 0.1.8, optional):** `START-HERE.bat --setup` asks above 8K context (or pass `--kv q4_0`). It
+halves the KV cache's memory with a Hadamard rotation before 4-bit rounding (PR #21), about 4% faster at 128K, but it
+is measurably less precise on long documents (perplexity +8-12%; needle tests still pass). 8-bit stays the default.
+Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/README.md).
+
 Time to first token is prompt length / prompt speed: about 7 s at 4K, 55 s at 32K, 4 minutes at 128K and 9 minutes at
 262K. The raw numbers: [`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
 
@@ -125,8 +130,16 @@ Windows, `build-essential` + CUDA on Ubuntu) and compiles the engine for your GP
 4. **Images?** yes / no (see [Images](#images-vision)).
 
 Then it downloads and prepares everything (the model is 66-76 GB, so the first start takes a while; an interrupted
-download continues where it stopped) and **starts the model**: your browser opens `http://127.0.0.1:8080`, a small
-page that shows it is running and lets you chat. The API is at `http://127.0.0.1:8080/v1` for your apps.
+download continues where it stopped) and **starts the model**: your browser opens `http://127.0.0.1:8080`, the Strata
+app. It has three tabs:
+- **Chat:** streaming answers, the model's thinking (folded away once it answers), code with a copy button, pictures when
+  images are on, and sampling and thinking-level settings. Chats stay in your browser.
+- **Monitor:** what the model is doing (reading the prompt, with progress, or writing, at how many tokens/s); GPU load,
+  VRAM, temperature, power and PCIe traffic; CPU, RAM and disk; the context in use; the last requests.
+- **About:** the model and engine settings, and the addresses to connect other apps.
+
+`http://127.0.0.1:8080/?q=your question` opens it with a new chat already asking. The API is at
+`http://127.0.0.1:8080/v1` for your apps.
 
 **Every time after that**, `START-HERE.bat` just starts the model (30-90 s to load 34-43 GB into RAM). Nothing is
 downloaded again. Closing the window stops the model.
@@ -171,6 +184,7 @@ The server listens on `http://127.0.0.1:8080` (change with `--port` in setup, or
 | Anthropic Messages (stream and non-stream, tools) | `POST /v1/messages` |
 | Model list / health | `GET /v1/models`, `GET /health` |
 | What the model is doing right now | `GET /status` |
+| Everything the Monitor tab shows (engine, live state, last requests, hardware) | `GET /metrics` |
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -202,9 +216,18 @@ print(r.choices[0].message.content)
   15 s, and `GET /status` says what it is doing (`reading the prompt`, `answering`, tokens so far). Closing the
   connection or pressing stop in your app really stops the model, so the next request starts at once.
 - **Chat apps.** Any app with an "OpenAI-compatible" provider works: base URL `http://127.0.0.1:8080/v1`, any API key.
-- **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut.
-- **From other devices / the internet.** The server listens on your PC only (`127.0.0.1`). To reach it from elsewhere,
-  put a tunnel in front of it, for example [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
+- **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
+  `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
+  can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
+  `--fit-max-tokens` to `serve/server.py`). A prompt that leaves no room at all is still refused.
+- **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
+  run setup with `START-HERE.bat --setup --host 0.0.0.0 --api-key some-long-secret` (or add `"host": "0.0.0.0"` and
+  `"api_key": "..."` to `strata-<model>.json`). The server window then prints this PC's addresses
+  (`from other devices: http://192.168.x.x:8080/`); open that on the other device, or use `.../v1` as an API base URL.
+  On Windows the firewall blocks it until you allow it: accept its prompt for Python (private networks), or run
+  `New-NetFirewallRule -DisplayName "Strata 8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private`
+  in an admin PowerShell, and make sure the network is set to Private.
+- **From the internet.** Put a tunnel in front of it, for example [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
   `cloudflared tunnel --url http://127.0.0.1:8080`. **Set a key first**, or anyone with the link can use your PC:
   add `"api_key": "some-long-secret"` to `strata-<model>.json` (or set the `STRATA_API_KEY` environment variable);
   clients then send it as their API key.
@@ -215,8 +238,15 @@ assistant turn and every 16K prompt tokens). A checkpoint is used only when the 
 and pictures. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`, `--turn-token ID`.
 
 **Current limits (v1):** one request at a time, and one conversation cached at a time (switching between two chats
-re-reads the other one); greedy decoding (temperature is ignored); images only when set up with them (below); no
-video.
+re-reads the other one); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
+seed** are honored per request (OpenAI and Anthropic fields); with the default adaptive expert tier a sampled result
+is not reproducible run to run - for seed-reproducible output add `--adapt-every 100000` (static residency) to the
+engine arguments. The run config's optional `sampling` block sets the defaults for requests that leave the fields out
+(`"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20}`); a request's own fields always win, and with no
+block at all a request without sampling keys decodes greedy. The penalties (`presence_penalty`, `frequency_penalty`,
+`repetition_penalty`, with `penalty_last_n` capping how many recent tokens they count over, default 64 when any
+penalty is set) ride the same path; they count the tokens the request has consumed, so a repetition penalty
+suppresses what the model itself just said, not the prompt alone.
 
 ---
 
@@ -294,6 +324,45 @@ test images.
 
 ---
 
+## Experimental speed projection (EXPERIMENTAL, off by default)
+
+**This is an experiment, not a finished feature.** It ships with Strata but stays off unless you turn it on.
+
+A 480 KB control vector for Qwen3.8-Flash-Next (`data/experimental-speed-projection/`, see its README). After each
+of layers 4-44 the engine removes one direction from every hyper-connection stream of the residual: `h -= (h . v) v`,
+one unit vector `v` per layer, exactly as llama.cpp does with the package's `--cvec-mode project` patches.
+
+**What it changes.** The vector's own package describes it as a **refusal-direction projection**: with it the model
+declines far fewer requests (it reports 1 of 50 vs 50 of 50 on its test set), and removing refusals removes a safety
+behaviour - you are responsible for what the model writes with it on. It also shifts ordinary answers a little
+(measured below). It is not an optimization in the engine: on the same text it costs 0.2-0.4% per token. What a
+chat's tokens/s does with it on depends on the text the model writes (length, repetition, how well the drafts land),
+so measure it on your own prompts; the Monitor marks every request ESP or stock.
+
+**Turning it on (at setup).** `START-HERE.bat --setup` asks "Turn on the experimental speed projection?" (default:
+no), or pass `--experimental-speed-projection on` (`off`, or a path to another vector GGUF). Only for the original
+Qwen3.8-Flash-Next, not Swift 1.5. It writes these engine flags (llama.cpp's) into `strata-<model>.json`:
+
+```
+--control-vector-scaled <Strata>\data\experimental-speed-projection\Qwen3.8-Flash-Next-experimental-speed-projection.gguf:1.0
+--control-vector-layer-range 4 44 --cvec-mode project --cvec-dir per-layer
+```
+
+The engine log then says `control vector mode = project, dir = per-layer, layers 4..44 (41 steered)`, and the web
+app's About tab lists it. (`--cvec-mode add` is llama.cpp's stock additive mode, for additive vectors.)
+
+**Per request.** A loaded vector is on for every request unless it says otherwise: the web app's Sampling drawer has
+a switch, and the API takes `"experimental_speed_projection": false` in the request body (OpenAI and Anthropic; a
+config default goes in `"sampling": {"experimental_speed_projection": false}`). Switching drops the conversation
+cache once, since the model state was computed the other way. Switched off, the output is token-for-token the stock
+model's.
+
+**Measured here** (Q2_0, fixed experts, 2,557 teacher-forced tokens of code, a document and a chat): the top-1 token
+changes at 10% of positions, mean KL from the stock model 0.063 nats (max 4.1), perplexity +15% on code, +2.3% on
+the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
+
+---
+
 ## Troubleshooting
 
 | Symptom | What to do |
@@ -302,14 +371,17 @@ test images.
 | Python or the build tools could not be installed | Install what it names (links are printed), then run it again. Everything already done is kept. |
 | `port 8080 is already in use` | Strata is already running (look for its window), or another program uses the port: `START-HERE.bat --port 8081`. |
 | `cudaHostRegister ... out of memory` in the log | Normal on Windows: the engine pins the experts in per-layer slices instead. Only a problem if the load then fails. |
-| The first start takes minutes | It is reading 34-43 GB into RAM; the second start is faster while the files are in the OS cache. |
+| The first start takes minutes | It is reading 34-55 GB into RAM; the second start is faster while the files are in the OS cache. |
+| The PC freezes for a few minutes at the first start | Normal the first time: the engine loads the experts into RAM, pins part of it for the GPU and sizes the expert cache. Wait; don't close the window. Still frozen after 10 minutes: restart the PC, close other programs, try again, or pick a smaller size. |
+| `the engine stopped unexpectedly (exit code ...)` | The engine process ended mid-answer - usually out of RAM (Linux ends the biggest program: `sudo dmesg \| grep -i -E 'killed process\|out of memory'`). The next request starts it again by itself. If it repeats: close other programs or pick a smaller size. The server also warns at start when the model's experts leave less than ~6 GB of RAM for everything else. |
 | Slow output, disk light busy | Not enough free RAM: close other programs, or choose Q2_0 / IQ2_XS. |
 | `prompt ... exceeds the context` | The request is longer than the context you chose: run setup again with a bigger `--context`. |
 | Slower than the tables | The monitor plugged into the GPU and other GPU programs take VRAM from the expert cache; RAM running below its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half. |
 | `this server was started without the vision encoder` | The model was set up for text only: run setup again with `--vision gpu`. |
 | A picture is refused or `cannot read the image` | The file is not a picture Pillow can open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF work). |
 | Pictures are slow (10-30 s) | The encoder runs on the CPU: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM). |
-| A request never finishes (older engines, mostly with pictures) | Run `START-HERE.bat` once to get engine 0.1.2 or newer. It keeps a real margin of VRAM free: the log says `... MiB of VRAM free with everything loaded` and warns when it is close to 0. |
+| A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
+| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving for 2 minutes ends with an error instead of hanging: the log says `no progress for 120 s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. (`STRATA_WATCHDOG_S` sets the 120 s; 0 turns it off.) |
 | Anything else | The engine log is `strata-<model>.log` in this folder. |
 
 ---
@@ -325,7 +397,9 @@ test images.
   as the GPU works on the cached ones (AVX-512 / AVX2 kernels, ggml's for the i-quants).
 - **SSD:** the 28.8 GB n-gram table, read a few rows per token through the OS cache.
 - **Speculation:** the model's own MTP layer drafts up to 3 tokens; one pass over all 48 layers checks them. 2.4-3.2
-  tokens per pass on average.
+  tokens per pass on average. When the reply repeats the context (code edits, quoted text), **prompt lookup** (engine
+  0.1.7) drafts up to 5 tokens from the earlier copy, but only where its measured acceptance and cost say it pays:
+  code edits 6-11% faster, other text unchanged. The drafts are checked like the MTP's, so the output is the same.
 - **Prompts** are processed in 2,048-token chunks with the experts streamed to the GPU over PCIe.
 
 The full story, with measurements, bottlenecks and what comes next: **[docs/paper/Strata-Paper.pdf](paper/Strata-Paper.pdf)**.
@@ -344,3 +418,5 @@ The full story, with measurements, bottlenecks and what comes next: **[docs/pape
   `third_party/ggml/LICENSE`.
 - Ideas from [Splash](https://github.com/incoai/splash), [ninfer](https://github.com/Neroued/ninfer) and
   [HyperQwen](https://github.com/syv-ai/HyperQwen); references in the paper.
+- The web app's font: [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL Open Font License 1.1, see
+  `serve/web/fonts/OFL.txt`). Its Monitor tab started from @code-martin's dashboard idea (PR #22).

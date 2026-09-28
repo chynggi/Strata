@@ -178,7 +178,9 @@ if(STRATA_ENABLE_CUDA)
                           src/kernels/cuda/ple.cu
                           src/kernels/cuda/kv_q8.cu
                           src/kernels/cuda/kv_stream.cu
+                          src/kernels/cuda/kv_q4.cu
                           src/kernels/cuda/fused_gr.cu
+                          src/kernels/cuda/cvec.cu
                           src/kernels/cuda/qsa_decode_attn.cu
                           src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu
@@ -363,6 +365,16 @@ if(STRATA_ENABLE_CUDA)
   target_link_libraries(kv_stream_parity PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME kv_stream_parity COMMAND kv_stream_parity)
 
+  # PR #21: Q4_0 KV with Walsh-Hadamard rotation vs a host reference (GPU, synthetic, no model).
+  add_executable(kv_q4_parity src/kernels/kv_q4_parity.cpp)
+  target_include_directories(kv_q4_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(kv_q4_parity PRIVATE strata_kernels CUDA::cudart)
+  add_test(NAME kv_q4_parity COMMAND kv_q4_parity)
+  add_executable(cvec_parity src/kernels/cvec_parity.cpp)
+  target_include_directories(cvec_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(cvec_parity PRIVATE strata_kernels CUDA::cudart)
+  add_test(NAME cvec_parity COMMAND cvec_parity)
+
   # Plan v0.3 P3: native MMVQ for 1..8 tokens (bitwise selftest + --bench timing); synthetic data, no model.
   if(STRATA_BUILD_TESTS)
   add_executable(native_mmvq_multi bench/micro/native_mmvq_multi.cpp)
@@ -424,7 +436,7 @@ endif()
 #     worse opt-out.  `cpu_require_expert_support()` therefore refuses at startup on a CPU without the
 #     features, and the fallback exists for tests, exactly as P2.S3 specifies.
 # Plan v0.3 P6: speculation components that need no GPU.
-add_library(strata_spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp)
+add_library(strata_spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp src/spec/draft_policy.cpp)
 target_include_directories(strata_spec PUBLIC include)
 if(STRATA_BUILD_TESTS)
   add_executable(suffix_drafter_test src/spec/suffix_drafter_test.cpp)
@@ -433,6 +445,9 @@ if(STRATA_BUILD_TESTS)
   add_executable(controller_test src/spec/controller_test.cpp)
   target_link_libraries(controller_test PRIVATE strata_spec)
   add_test(NAME controller_test COMMAND controller_test)
+  add_executable(draft_policy_test src/spec/draft_policy_test.cpp)
+  target_link_libraries(draft_policy_test PRIVATE strata_spec)
+  add_test(NAME draft_policy_test COMMAND draft_policy_test)
 endif()
 
 add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
@@ -535,6 +550,10 @@ if(STRATA_BUILD_TESTS)
   add_executable(pool_test src/kernels/cpu/pool_test.cpp)
   target_link_libraries(pool_test PRIVATE strata_kernels_cpu)
   add_test(NAME pool_test COMMAND pool_test --selftest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # issue #29: tiny batches with sleeping workers, as on a big-VRAM card; a hang fails it
+  add_executable(pool_stress src/kernels/cpu/pool_stress.cpp)
+  target_link_libraries(pool_stress PRIVATE strata_kernels_cpu)
+  add_test(NAME pool_stress COMMAND pool_stress 20)
 endif()
 
 if(STRATA_BUILD_TESTS)

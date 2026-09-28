@@ -24,6 +24,8 @@ refusal-removed builds, each with its own sizes (orca IQ2_M is the one that fits
 
 Options: --family qwen|swift|orca|mrad|rvn, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S (or the family's size), --context 32768, --vision yes|no|gpu|cpu, --port 8080, --yes (recommended
 answers, no questions), --setup (install another model / change settings instead of starting), --no-start,
+--host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
+(EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile instead of the ready-made
 engine), --check (only check this PC).
 """
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import platform
@@ -58,8 +61,8 @@ PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
-MIN_ENGINE = (0, 1, 6)                 # KV streaming (--kv-resident), v0.1.5; its drafter fallback, v0.1.6
-PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow"]
+MIN_ENGINE = (0, 1, 12)                # the expert-pool race and the serve watchdog (issue #29), v0.1.12
+PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake", "ninja", "pillow", "psutil"]
 
 MODELS = {
     "Q2_0": {"about": "2-bit, the fastest", "download_gb": 66.4, "ram_gb": 48, "arena_gb": 34.0},
@@ -125,6 +128,8 @@ FAMILIES = {
                                   "extra_gb": 56}}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
+# EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
+ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
 # the image encoder on the GPU (~1.2 GB at 1024 image tokens) warms up before the engine starts, so the engine
 # sizes its expert slots around it and the default reserve (700 MiB) is enough; engines before 0.1.2 need more
 VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
@@ -552,7 +557,13 @@ def update_installed_engine(url_base) -> None:
     meta_text = info.read_text()
     meta = json.loads(meta_text)
     ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:3] if x.isdigit())
-    if meta.get("source") == "local" or ver >= MIN_ENGINE:
+    local = meta.get("source") == "local"
+    vision = meta.get("vision") or "none"
+    if local:                                          # compiled here: is it older than the source (a git pull)?
+        if meta.get("src") == source_hash(ENGINE_SOURCES) and \
+                (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES)):
+            return
+    elif ver >= MIN_ENGINE:
         return
     try:                                               # a running engine cannot be replaced (Windows keeps it locked)
         for x in (EXE, VEXE):
@@ -560,9 +571,17 @@ def update_installed_engine(url_base) -> None:
                 with open(eng / x, "r+b"):
                     pass
     except OSError:
-        warn(f"engine {meta.get('version')} is in use: close the model window and run this again to update it")
+        warn(f"engine {meta.get('version') or ''} is in use: close the model window and run this again to update it")
         return
     gpu = gpu_info()
+    if local:
+        try:                                           # a failed compile must not stop the model from starting
+            if gpu is None:
+                raise RuntimeError("no NVIDIA GPU found")
+            build_engine(gpu, vision, False, get_llama_cpp())
+        except (Exception, SystemExit) as e:
+            warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the installed one")
+        return
     new = None
     if gpu is not None:
         try:
@@ -655,24 +674,45 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
         run(build)
 
 
+ENGINE_SOURCES = ("CMakeLists.txt", "src", "include", "third_party/ggml")
+VISION_SOURCES = ("tools/vision",)
+
+
+def source_hash(parts) -> str:
+    """A fingerprint of the files a compiled engine is built from, kept in engine/BUILD.json: when a `git pull`
+    changes them, the engine is compiled again (issue #31)."""
+    h = hashlib.sha256(LLAMA_CPP_COMMIT.encode())
+    for part in parts:
+        base = ROOT / part
+        for f in [base] if base.is_file() else sorted(x for x in base.rglob("*") if x.is_file()):
+            h.update(f.relative_to(ROOT).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n"))
+    return h.hexdigest()[:16]
+
+
 def build_engine(gpu, vision, yes, llama) -> Path:
-    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/."""
+    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
+    engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes."""
     eng = ROOT / "engine"
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
     want_vision = vision != "none"
-    if meta.get("source") == "local" and (eng / EXE).exists() and (not want_vision or (eng / VEXE).exists()):
+    local = meta.get("source") == "local"
+    src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
+    engine_ok = local and (eng / EXE).exists() and meta.get("src") == src
+    vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
+    if engine_ok and vision_ok:
         ok("engine already built for this PC")
         return eng
     nvcc, vcvars = install_build_tools(gpu, yes)
-    if not (eng / EXE).exists() or meta.get("source") != "local":
-        say("  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
+    if not engine_ok:
+        say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
+            if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, ROOT / "build", "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata.bat")
         shutil.copy2(ROOT / "build" / EXE, eng / EXE)
-    if want_vision and not (eng / VEXE).exists():
+    if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
         defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}"]
         if vision == "gpu":
@@ -682,7 +722,7 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "archs": [int(gpu["arch"])], "vision": vision,
-                                 "cuda_dirs": dirs}, indent=1))
+                                 "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
 
@@ -729,9 +769,18 @@ def main() -> int:
                     "orca / mrad / rvn = uncensored builds (orca is gated: needs a Hugging Face token)")
     ap.add_argument("--model", choices=list(dict.fromkeys(q for f in FAMILIES.values() for q in f.get("sizes", MODELS))))
     ap.add_argument("--context", type=int)
+    ap.add_argument("--kv", choices=["int8", "q4_0"],
+                    help="KV cache precision above 8K context: int8 (default) or q4_0 (half the memory, a little less "
+                         "precise)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (yes = the encoder on the GPU)")
+    ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
+                    help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
+                         "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
+                                   "devices on your network (issue #26; set --api-key too)")
+    ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0)")
     ap.add_argument("--models-dir", default=str(ROOT / "models"), help="where the GGUF files go (~70 GB)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with the two shards)")
     ap.add_argument("--yes", action="store_true", help="accept the recommended answers")
@@ -778,7 +827,14 @@ def main() -> int:
         warn("less than 12 GB of VRAM: Strata will run, but most experts stay on the CPU and it will be slow")
     ram = ram_gb()
     cpu, avx2, avx512 = cpu_info()
-    ok(f"RAM: {ram:.0f} GB")
+    need = min(d["ram_gb"] for d in MODELS.values())
+    if ram < need - 4 and not a.check:
+        # every model keeps ALL its experts in RAM (34+ GB); VRAM only holds a copy of the most-used ones, so a
+        # bigger GPU does not lower this
+        fail(f"RAM: {ram:.0f} GB - the smallest model (Q2_0 / IQ2_XS) needs about {need} GB",
+             "Strata keeps all of the model's experts in RAM (34-50 GB, whatever the GPU) and the GPU holds a copy "
+             "of the most-used ones: it needs 48 GB of RAM or more")
+    ok(f"RAM: {ram:.0f} GB" if ram >= need - 4 else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)")
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     if not avx2:
         fail("this CPU has no AVX2; Strata needs at least AVX2")
@@ -840,6 +896,17 @@ def main() -> int:
              "+ the context): using 128K")
         ctx = 131072
     ok(f"context: {ctx} tokens")
+    # the KV cache (the model's memory of the conversation): 8-bit, or 4-bit after a Hadamard rotation (PR #21)
+    kv = "fp16" if ctx <= 8192 else (a.kv or "int8")
+    if ctx > 8192 and not a.kv and not a.yes:
+        say()
+        say("  KV cache precision (the model's memory of the conversation):")
+        say("  1) 8-bit   (recommended: what every published number was measured with)")
+        say("  2) 4-bit   half the memory (about 4% faster at 128K), but measurably less precise on long")
+        say("             documents; long-context lookups (needle tests) still pass")
+        kv = ["int8", "q4_0"][int(ask("KV cache?", ["1", "2"], "1", a.yes)) - 1]
+    if ctx > 8192:
+        ok(f"KV cache: {'8-bit' if kv == 'int8' else '4-bit (Hadamard-rotated)'}")
     if a.vision:
         vision = {"yes": "gpu", "no": "none"}.get(a.vision, a.vision)
     else:
@@ -848,6 +915,25 @@ def main() -> int:
         say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
         vision = "gpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
+    # EXPERIMENTAL: the experimental-speed-projection control vector (data/experimental-speed-projection), off unless
+    # chosen here; with it loaded, the web app and the API switch it off per request
+    esp = None
+    esp_choice = (a.experimental_speed_projection or "").strip()
+    if family == "qwen":
+        if not esp_choice:
+            say()
+            say("  EXPERIMENTAL - speed projection: a small control vector applied while the model runs (layers 4-44).")
+            say("  It changes how the model answers: its package describes it as a refusal-direction projection (the")
+            say("  model declines far fewer requests). Off unless you choose it; when on, the web app can switch it off")
+            say("  per chat. Details: data/experimental-speed-projection/README.md")
+            esp_choice = "on" if ask("Turn on the experimental speed projection?", ["y", "n"], "n", a.yes) == "y" else "off"
+        if esp_choice.lower() not in ("off", "no", "n", "0"):
+            esp = ESP_VECTOR if esp_choice.lower() in ("on", "yes", "y", "1") else Path(esp_choice).expanduser().resolve()
+            if not esp.is_file():
+                fail(f"the experimental speed projection's vector is missing: {esp}")
+        ok("experimental speed projection: " + ("ON (experimental)" if esp else "off"))
+    elif esp_choice.lower() not in ("", "off", "no", "n", "0"):
+        warn("the experimental speed projection is made for the original Qwen3.8-Flash-Next, not Swift 1.5: left off")
     models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
     n = fam.get("shards", 2)
     shards = [models_dir / fam["file"].format(q=model, i=i, n=n) for i in range(1, n + 1)]
@@ -863,7 +949,7 @@ def main() -> int:
 
     # ---- 3. python packages
     step(3, "Python packages")
-    pip_install(PY_PACKAGES, "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow")
+    pip_install(PY_PACKAGES, "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
     # ---- 4. the engine
     step(4, "the Strata engine")
@@ -959,19 +1045,27 @@ def main() -> int:
             "--prefill", "2048", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
             "--max-context", str(ctx)]
     if ctx > 8192:
-        args += ["--kv", "int8"]
+        args += ["--kv", kv]
     # KV streaming: from 64K up the whole KV cache lives in RAM and only the part the attention reads (32K positions
     # per layer) stays in VRAM; the VRAM it frees holds more experts (+6% at 128K, +23% at 262K with Q2_0). It
-    # costs ~13.7 KB of RAM per context token (1.7 GB at 128K, 3.4 GB at 262K), so only when that fits.
-    kv_ram_gb = ctx * 13728 / 1e9
+    # costs ~13.7 KB of RAM per context token with 8-bit KV (1.7 GB at 128K), 7.5 KB with 4-bit, so only when it fits.
+    kv_ram_gb = ctx * (13 * (576 if kv == "q4_0" else 1056)) / 1e9   # 12 QSA layers + the draft layer
     if ctx >= 65536 and ram >= sizes[model]["ram_gb"] + kv_ram_gb + 1:
         args += ["--kv-resident", "32768"]
         ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
+    if esp is not None:
+        # the package's profile, with llama.cpp's flags (the engine takes the same ones)
+        args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
+                 "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": a.port}
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
     if vision != "none":
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
                          "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
@@ -986,6 +1080,9 @@ def main() -> int:
     say("All set.")
     say(f"  API (OpenAI):     http://127.0.0.1:{a.port}/v1   (any API key; model name: anything)")
     say(f"  API (Anthropic):  http://127.0.0.1:{a.port}/v1/messages")
+    if a.host and a.host not in ("127.0.0.1", "localhost"):
+        say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{a.port}/)"
+            + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
