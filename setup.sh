@@ -1,8 +1,10 @@
 #!/bin/sh
 # Strata for Linux: the first run installs everything and starts the model; later runs just start it.
 # Needs only an NVIDIA driver. Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
+# The Linux environment is .venv-linux, not .venv, so a dual-boot PC can share this folder with Windows
+# (which keeps its own .venv) without either side overwriting the other.
 cd "$(dirname "$0")" || exit 1
-if [ ! -x .venv/bin/python ]; then
+if [ ! -x .venv-linux/bin/python ]; then
   PY=""
   for c in python3 python; do
     if command -v $c >/dev/null 2>&1 && $c -c 'import sys, venv; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
@@ -25,6 +27,6 @@ if [ ! -x .venv/bin/python ]; then
     fi
   fi
   # a private environment inside this folder (system Python stays untouched; newer distros refuse global pip)
-  $PY -m venv .venv || { echo "could not create .venv: sudo apt install python3-venv"; exit 1; }
+  $PY -m venv .venv-linux || { echo "could not create .venv-linux: sudo apt install python3-venv"; exit 1; }
 fi
-exec .venv/bin/python setup.py "$@"
+exec .venv-linux/bin/python setup.py "$@"

@@ -23,8 +23,8 @@ __pycache__/
 *.occ1
 td.log
 
-# created by setup.py on the user's machine
-/.venv/
+# created by setup.py on the user's machine (one per OS in a dual-boot shared folder: .venv/ + .venv-linux/)
+/.venv*/
 /build/
 /third_party/llama.cpp/
 /models/
@@ -40,8 +40,8 @@ td.log
 build-vision*/
 build-vision.bat
 
-# setup.py outputs (engine, downloads) and release builds
-/engine/
+# setup.py outputs (engine, downloads) and release builds (engine/ + engine-linux/ in a dual-boot shared folder)
+/engine*/
 /build-release*/
 /dist/
 *.done

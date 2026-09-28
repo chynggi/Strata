@@ -12,7 +12,8 @@ What the first run does (each step is skipped when it is already done):
 
   1. checks your PC: NVIDIA GPU and driver, RAM, CPU, free disk space
   2. asks the questions
-  3. installs the Python packages it needs into .venv (numpy, jinja2, ..., and NVIDIA's CUDA libraries)
+  3. installs the Python packages it needs into its private environment (.venv on Windows, .venv-linux on Linux;
+     numpy, jinja2, ..., and NVIDIA's CUDA libraries)
   4. gets the Strata engine: a ready-made build for RTX 30/40/50 cards (no compiler needed); if none fits your PC,
      it installs the build tools (asks first) and compiles the engine for your GPU
   5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images
@@ -136,6 +137,13 @@ VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
           "cpu": {"max_tokens": 300, "reserve_mib": 700}}
 EXE = "strata.exe" if WIN else "strata"
 VEXE = "strata-vision.exe" if WIN else "strata-vision"
+# A dual-boot PC can keep this folder on a disk both systems see. Everything an OS builds for itself gets its own
+# name, so Windows and Linux never overwrite each other's engine, build cache, config or log. The model files,
+# packs and the MTP draft layer are data and stay shared between the two.
+ENGINE_DIR = ROOT / ("engine" if WIN else "engine-linux")
+BUILD_DIR = ROOT / ("build" if WIN else "build-linux")
+VISION_BUILD_DIR = ROOT / ("build-vision" if WIN else "build-vision-linux")
+CFG_PREFIX = "" if WIN else "linux-"                 # strata-<prefix><tag>.json and .log
 
 
 # ------------------------------------------------------------------------------------------------ output
@@ -454,7 +462,7 @@ def get_llama_cpp():
 
 
 def pip_install(packages, what):
-    """pip install into .venv, skipped when the same list was installed before."""
+    """pip install into the private environment (.venv / .venv-linux), skipped when the same list was installed before."""
     stamp = Path(sys.prefix) / ".strata-pip.json"
     have = json.loads(stamp.read_text()) if stamp.exists() else []
     need = [p for p in packages if p not in have]
@@ -487,8 +495,8 @@ def driver_major(gpu):
 
 
 def get_prebuilt(url_base, gpu, vision) -> Path | None:
-    """The ready-made engine in engine/ (kept between runs), or None when there is none for this PC."""
-    eng = ROOT / "engine"
+    """The ready-made engine in the engine folder (kept between runs), or None when there is none for this PC."""
+    eng = ENGINE_DIR
     info = eng / "BUILD.json"
     if info.exists() and (eng / EXE).exists():
         meta = json.loads(info.read_text())
@@ -500,7 +508,7 @@ def get_prebuilt(url_base, gpu, vision) -> Path | None:
         info.unlink()
     if not url_base:
         return None
-    z = ROOT / "engine" / PREBUILT_ASSET
+    z = ENGINE_DIR / PREBUILT_ASSET
     base = url_base if url_base.endswith(("/", "\\")) else url_base + "/"
     if base.startswith(("http://", "https://")):
         try:                                           # not published (yet), or no internet: compile instead
@@ -511,7 +519,7 @@ def get_prebuilt(url_base, gpu, vision) -> Path | None:
             return None
     say("  Downloading the ready-made Strata engine ...")
     download(base + PREBUILT_ASSET, z, "Strata engine")
-    tmp = ROOT / "engine" / "_unpack"
+    tmp = ENGINE_DIR / "_unpack"
     shutil.rmtree(tmp, ignore_errors=True)
     with zipfile.ZipFile(z) as f:
         f.extractall(tmp)
@@ -550,7 +558,7 @@ def update_installed_engine(url_base) -> None:
     """An installed ready-made engine older than MIN_ENGINE is replaced before the model starts, so a plain
     START-HERE.bat on an existing install picks up a new release.  If that cannot happen (no internet, the model
     still running, no ready-made engine for this GPU) the installed engine is kept and starts as before."""
-    eng = ROOT / "engine"
+    eng = ENGINE_DIR
     info = eng / "BUILD.json"
     if not info.exists() or not (eng / EXE).exists():
         return
@@ -659,7 +667,7 @@ def install_build_tools(gpu, yes):
 def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     cmake, ninja = find_tool("cmake"), find_tool("ninja")
     if cmake is None or ninja is None:
-        fail("cmake / ninja not found after installing them", "run: .venv python -m pip install cmake ninja")
+        fail("cmake / ninja not found after installing them", f'run: "{sys.executable}" -m pip install cmake ninja')
     conf = [cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-S", str(src), "-B", str(bdir),
             "-DCMAKE_BUILD_TYPE=Release", *defs]
     build = [cmake, "--build", str(bdir), "--target", target, "-j", str(max(2, (os.cpu_count() or 4) // 2))]
@@ -690,9 +698,9 @@ def source_hash(parts) -> str:
 
 
 def build_engine(gpu, vision, yes, llama) -> Path:
-    """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
+    """Compile the engine (and, for images, the encoder) for this GPU; the results go to the engine folder.  A compiled
     engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes."""
-    eng = ROOT / "engine"
+    eng = ENGINE_DIR
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text()) if stamp.exists() else {}
@@ -708,17 +716,17 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     if not engine_ok:
         say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
-        cmake_build(ROOT, ROOT / "build", "strata",
+        cmake_build(ROOT, BUILD_DIR, "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata.bat")
-        shutil.copy2(ROOT / "build" / EXE, eng / EXE)
+        shutil.copy2(BUILD_DIR / EXE, eng / EXE)
     if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
         defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}"]
         if vision == "gpu":
             defs += [f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}", f"-DCMAKE_CUDA_COMPILER={nvcc}"]
-        cmake_build(ROOT / "tools" / "vision", ROOT / "build-vision", "strata-vision", defs, vcvars, "build-vision.bat")
-        shutil.copy2(ROOT / "build-vision" / "bin" / VEXE, eng / VEXE)
+        cmake_build(ROOT / "tools" / "vision", VISION_BUILD_DIR, "strata-vision", defs, vcvars, "build-vision.bat")
+        shutil.copy2(VISION_BUILD_DIR / "bin" / VEXE, eng / VEXE)
     bindir = Path(nvcc).parent                            # the toolkit's own libraries (bin, bin/x64, lib64)
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "archs": [int(gpu["arch"])], "vision": vision,
@@ -729,7 +737,11 @@ def build_engine(gpu, vision, yes, llama) -> Path:
 
 # ------------------------------------------------------------------------------------------------ start
 def installed_configs():
-    return sorted(ROOT.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    """The run configs written for this OS. In a dual-boot shared folder Windows keeps strata-<model>.json and
+    Linux keeps strata-linux-<model>.json, so neither picks up a config that points at the other OS's engine."""
+    all_cfgs = list(ROOT.glob("strata-*.json"))
+    mine = [p for p in all_cfgs if p.name.startswith("strata-linux-") == (not WIN)]
+    return sorted(mine, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def start(cfg_path: Path, port: int | None, open_browser=True) -> int:
@@ -870,7 +882,7 @@ def main() -> int:
         d = sizes[m]
         fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
         say(f"  {i}) {m:8s} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
-    rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 else "1"
+    rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 and "IQ3_XXS" in names else "1"
     if "sizes" in fam:                                 # the biggest that fits, else the smallest
         rec = str(max([i for i, m in enumerate(names, 1) if ram >= sizes[m]["ram_gb"]] or [1]))
     if a.model and a.model not in sizes:
@@ -938,6 +950,8 @@ def main() -> int:
     n = fam.get("shards", 2)
     shards = [models_dir / fam["file"].format(q=model, i=i, n=n) for i in range(1, n + 1)]
     have_model = all(s.exists() and (done(s) or a.gguf_dir) for s in shards)
+    if have_model and not a.gguf_dir:                  # a model downloaded here (any OS) is checked and reused
+        ok(f"the model is already here: reusing its {len(shards)} file(s), nothing to download")
     need = (0 if a.gguf_dir or have_model else sizes[model]["download_gb"]) + 8 + \
         (40 if model == "Q2_0" and avx512 and family == "qwen" else 0) + (1 if vision != "none" else 0) + \
         (0 if (ROOT / "packs" / tag.lower() / "native_experts.txt").exists() else sizes[model].get("extra_gb", 0))
@@ -1060,7 +1074,7 @@ def main() -> int:
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
                  "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+           "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{CFG_PREFIX}{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": a.port}
     if a.host:
         cfg["host"] = a.host
@@ -1071,7 +1085,7 @@ def main() -> int:
                          "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
-    cfg_path = ROOT / f"strata-{tag.lower()}.json"
+    cfg_path = ROOT / f"strata-{CFG_PREFIX}{tag.lower()}.json"
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     script = write_run_script(tag, cfg_path, a.port)
     ok(f"start script: {script.name}")

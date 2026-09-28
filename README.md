@@ -106,6 +106,12 @@ window to stop the model.
 
 **Linux:** run `./setup.sh` - same questions, same result.
 
+**Windows and Linux on the same PC (dual boot)?** Keep this folder on a disk both systems can see. Each system builds
+its own copies of the parts that are OS-specific - the engine (`engine/` on Windows, `engine-linux/` on Linux), the
+CMake build cache (`build*/` vs `build-linux*/`) and the Python environment (`.venv` vs `.venv-linux`) - while the
+downloaded model, its prepared packs and the MTP draft layer are **shared**, so nothing is downloaded, prepared or
+compiled twice. Just run `START-HERE.bat` on Windows and `./setup.sh` on Linux; neither touches the other's files.
+
 ## Using it
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="The Strata app's Monitor tab next to a coding agent"><br>
@@ -113,7 +119,7 @@ window to stop the model.
 
 - **In the browser:** `http://127.0.0.1:8080` - the Strata app (it opens by itself when the model starts): **Chat**, a
   live **Monitor** of the model and your GPU/CPU/RAM, and **About** with the settings and addresses.
-- **Chat in the terminal:** `.venv\Scripts\python chat.py`
+- **Chat in the terminal:** `.venv\Scripts\python chat.py` on Windows, `.venv-linux/bin/python chat.py` on Linux
 - **Your apps and coding agents:** add it as an "OpenAI-compatible" provider with base URL
   **`http://127.0.0.1:8080/v1`**, any API key and any model name. Apps that use Anthropic's API: `http://127.0.0.1:8080/v1/messages`.
 - **Thinking:** the model thinks before it answers. Choose **off, low, medium or high** - in the chat page menu, with
@@ -157,7 +163,7 @@ The conversation is longer than the context you chose. Start a new chat, or run 
 context.
 
 **Still stuck?** Look in the [full troubleshooting table](docs/DETAILS.md#troubleshooting), or open an issue and
-attach `strata-<model>.log` from the Strata folder.
+attach `strata-<model>.log` from the Strata folder (on Linux, `strata-linux-<model>.log`).
 
 ## How does it work?
 

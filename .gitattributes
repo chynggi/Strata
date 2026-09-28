@@ -1,6 +1,11 @@
-# Frozen prompts are hashed byte for byte (manifest sha256): never convert their line endings.
-bench/prompts/** -text
+# Everything is LF in the repository and on checkout, so a Windows editor cannot turn the whole tree into CRLF
+# (commit 260928 did, and every later merge conflicted on every line). The launchers below keep their platform
+# line endings instead.
+* text=auto eol=lf
 
 # launchers keep their platform line endings wherever the repository is cloned
 *.sh text eol=lf
 *.bat text eol=crlf
+
+# Frozen prompts are hashed byte for byte (manifest sha256): never convert their line endings.
+bench/prompts/** -text

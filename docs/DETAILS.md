@@ -110,11 +110,16 @@ You need **only an NVIDIA driver** (version 580 or newer; update it with the NVI
 | Disk | ~70-80 GB free for the model, ~6 GB for the MTP layer (+1 GB with images). **Q2_0 on an AVX-512 CPU** also writes a one-time ~40 GB copy of its experts for the fast CPU kernel. An NVMe SSD is strongly recommended. |
 | OS | Windows 10/11, or Linux (Ubuntu 22.04/24.04 get everything installed automatically). |
 
-What the first start installs, all inside this folder (`.venv/`, `engine/`, `third_party/`, `models/`, `packs/`, `mtp/`):
-Python 3.12 if you have none (for your user account, no admin), a private Python environment, NVIDIA's CUDA libraries
-(from pip, ~0.4 GB), the ready-made Strata engine for RTX 30/40/50, the model and the MTP draft layer. If no
-ready-made engine fits your PC, it offers to install the build tools (Visual Studio Build Tools + CUDA Toolkit on
-Windows, `build-essential` + CUDA on Ubuntu) and compiles the engine for your GPU (asks first; 20-40 minutes once).
+What the first start installs, inside this folder: Python 3.12 if you have none (for your user account, no admin), a
+private Python environment, NVIDIA's CUDA libraries (from pip, ~0.4 GB), the ready-made Strata engine for RTX 30/40/50,
+the model, its prepared packs and the MTP draft layer. If no ready-made engine fits your PC, it offers to install the
+build tools (Visual Studio Build Tools + CUDA Toolkit on Windows, `build-essential` + CUDA on Ubuntu) and compiles the
+engine for your GPU (asks first; 20-40 minutes once).
+
+On a **dual-boot PC** the folder can sit on a disk both Windows and Linux see. The pieces each OS builds for itself
+are kept apart - the environment (`.venv/` on Windows, `.venv-linux/` on Linux), the engine (`engine/` vs
+`engine-linux/`) and the CMake build cache (`build*/` vs `build-linux*/`) - while the model (`models/`), the prepared
+packs (`packs/`), the MTP layer (`mtp/`) and `third_party/` are shared. See [Windows and Linux on one PC](#windows-and-linux-on-one-pc-dual-boot).
 
 ---
 
@@ -170,7 +175,20 @@ With more than one model installed, it asks which one to start. `run-<model>.bat
 The same questions, the same automatic install (it uses `sudo apt` for Python and, only if it has to compile,
 for the build tools), and the same start: `http://127.0.0.1:8080`. Later runs of `./setup.sh` (or `./run-<model>.sh`)
 start the model directly. Options as on Windows (`./setup.sh --setup`, `--model Q2_0 --yes`, `--gguf-dir /data/Q2_0`).
-Terminal chat: `.venv/bin/python chat.py`.
+Terminal chat: `.venv-linux/bin/python chat.py` (Linux; the environment is `.venv-linux/`, not `.venv/`, so a dual-boot
+PC can share this folder with Windows).
+
+### Windows and Linux on one PC (dual boot)
+
+Keep this folder on a disk both systems can see and run each side's launcher as usual - `START-HERE.bat` on Windows,
+`./setup.sh` on Linux. Each OS keeps its own engine (`engine/` vs `engine-linux/`), build cache (`build*/` vs
+`build-linux*/`), Python environment (`.venv/` vs `.venv-linux/`), run config (`strata-<model>.json` vs
+`strata-linux-<model>.json`) and log, so the two never overwrite each other. The model, its packs and the MTP layer
+are shared, so only the first OS bears the download and preparation cost; the second finds them, checks them and reuses
+them.
+
+To reclaim space you can delete either side's private folders - `engine-linux/`, `build-linux*/`, `build-vision-linux*/`,
+`.venv-linux/` and `strata-linux-*.json` / `.log` - without touching the Windows install (and vice versa).
 
 ---
 
@@ -218,19 +236,21 @@ print(r.choices[0].message.content)
 - **Chat apps.** Any app with an "OpenAI-compatible" provider works: base URL `http://127.0.0.1:8080/v1`, any API key.
 - **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
   `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
-  can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
-  `--fit-max-tokens` to `serve/server.py`). A prompt that leaves no room at all is still refused.
+  can instead get it shortened to the room left: add `"fit_max_tokens": true` to the run config (`strata-<model>.json`,
+  or `strata-linux-<model>.json` on Linux), or pass `--fit-max-tokens` to `serve/server.py`. A prompt that leaves no
+  room at all is still refused.
 - **From other devices on your network.** The server listens on your PC only (`127.0.0.1`) unless you say otherwise:
   run setup with `START-HERE.bat --setup --host 0.0.0.0 --api-key some-long-secret` (or add `"host": "0.0.0.0"` and
-  `"api_key": "..."` to `strata-<model>.json`). The server window then prints this PC's addresses
+  `"api_key": "..."` to the run config: `strata-<model>.json`, or `strata-linux-<model>.json` on Linux). The server
+  window then prints this PC's addresses
   (`from other devices: http://192.168.x.x:8080/`); open that on the other device, or use `.../v1` as an API base URL.
   On Windows the firewall blocks it until you allow it: accept its prompt for Python (private networks), or run
   `New-NetFirewallRule -DisplayName "Strata 8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow -Profile Private`
   in an admin PowerShell, and make sure the network is set to Private.
 - **From the internet.** Put a tunnel in front of it, for example [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
   `cloudflared tunnel --url http://127.0.0.1:8080`. **Set a key first**, or anyone with the link can use your PC:
-  add `"api_key": "some-long-secret"` to `strata-<model>.json` (or set the `STRATA_API_KEY` environment variable);
-  clients then send it as their API key.
+  add `"api_key": "some-long-secret"` to the run config (`strata-<model>.json`, or `strata-linux-<model>.json` on
+  Linux), or set the `STRATA_API_KEY` environment variable; clients then send it as their API key.
 
 **Conversation cache.** A request that continues a chat reads only the part after what the engine already holds: the
 live session, or one of the checkpoints it keeps in RAM (up to 6, ~118 MB each, taken at the start of each new
@@ -341,7 +361,8 @@ so measure it on your own prompts; the Monitor marks every request ESP or stock.
 
 **Turning it on (at setup).** `START-HERE.bat --setup` asks "Turn on the experimental speed projection?" (default:
 no), or pass `--experimental-speed-projection on` (`off`, or a path to another vector GGUF). Only for the original
-Qwen3.8-Flash-Next, not Swift 1.5. It writes these engine flags (llama.cpp's) into `strata-<model>.json`:
+Qwen3.8-Flash-Next, not Swift 1.5. It writes these engine flags (llama.cpp's) into the run config
+(`strata-<model>.json`; Linux: `strata-linux-<model>.json`):
 
 ```
 --control-vector-scaled <Strata>\data\experimental-speed-projection\Qwen3.8-Flash-Next-experimental-speed-projection.gguf:1.0
@@ -382,7 +403,7 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | Pictures are slow (10-30 s) | The encoder runs on the CPU: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM). |
 | A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
 | Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving for 2 minutes ends with an error instead of hanging: the log says `no progress for 120 s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. (`STRATA_WATCHDOG_S` sets the 120 s; 0 turns it off.) |
-| Anything else | The engine log is `strata-<model>.log` in this folder. |
+| Anything else | The engine log is `strata-<model>.log` in this folder (Linux: `strata-linux-<model>.log`). |
 
 ---
 
