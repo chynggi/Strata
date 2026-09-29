@@ -29,20 +29,46 @@ namespace {
 // A 2 MB-aligned reservation.  Large pages first, then the largest alignment the OS will give us for free.
 void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
 #ifdef _WIN32
+    // MEM_LARGE_PAGES needs SeLockMemoryPrivilege.  Having it assigned to the account is not enough: the
+    // PROCESS must enable it in its own token (AdjustTokenPrivileges) before VirtualAlloc, or the call fails.
+    // An account without the assignment, or a failure to enable, leaves the process as it was: VirtualAlloc
+    // then refuses and the 4 KB fallback below runs - that is the EXPECTED outcome on a desktop.
+    {
+        HANDLE tok = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
+            TOKEN_PRIVILEGES tp{};
+            tp.PrivilegeCount = 1;
+            if (LookupPrivilegeValueW(nullptr, L"SeLockMemoryPrivilege", &tp.Privileges[0].Luid)) {
+                tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+                if (!AdjustTokenPrivileges(tok, FALSE, &tp, 0, nullptr, nullptr) && GetLastError() != ERROR_NOT_ALL_ASSIGNED)
+                    (void) 0;   // nothing actionable: the large-page attempt below reports the outcome
+            }
+            CloseHandle(tok);
+        }
+    }
     // MEM_LARGE_PAGES needs SeLockMemoryPrivilege; a normal account does not have it and VirtualAlloc then
     // fails with ERROR_PRIVILEGE_NOT_HELD.  That is the EXPECTED outcome on a desktop, not an error.
     SIZE_T large = GetLargePageMinimum();
-    if (large > 0) {
-        void* p = VirtualAlloc(nullptr, (SIZE_T) bytes, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
+    // A/B switch: STRATA_NO_LARGEPAGES=1 skips the large-page attempt, same run, same boot.
+    if (large > 0 && std::getenv("STRATA_NO_LARGEPAGES") == nullptr) {
+        // MEM_LARGE_PAGES requires the allocation size to be an exact multiple of the large page size -
+        // anything else is ERROR_INVALID_PARAMETER (87), which reads like a privilege problem but is not.
+        // Round up: the slack is under 2 MB and the tail stays unused.
+        const SIZE_T lbytes = (SIZE_T) (((SIZE_T) bytes + large - 1) / large * large);
+        void* p = VirtualAlloc(nullptr, lbytes, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
                                PAGE_READWRITE);
         if (p) {
             got = PageBacking::LargePages;
             note = "large pages (" + std::to_string((unsigned long long) large) + " B)";
             return p;
         }
-        note = "large pages refused (GetLargePageMinimum=" + std::to_string((unsigned long long) large) +
-               ", VirtualAlloc error " + std::to_string((unsigned long long) GetLastError()) +
-               " - needs SeLockMemoryPrivilege); using 4 KB pages";
+        // 1450 (ERROR_NO_SYSTEM_RESOURCES) is the large-page pool saying no, 87 is a size that is not a
+        // multiple of the minimum, 1314 is the privilege: without the byte count the three read as one bug.
+        note = "large pages refused for " + std::to_string((unsigned long long) lbytes) + " B (GetLargePageMinimum=" +
+               std::to_string((unsigned long long) large) + ", VirtualAlloc error " +
+               std::to_string((unsigned long long) GetLastError()) + "); using 4 KB pages";
+    } else if (std::getenv("STRATA_NO_LARGEPAGES") != nullptr) {
+        note = "large pages skipped (STRATA_NO_LARGEPAGES); using 4 KB pages";
     } else {
         note = "this system has no large-page minimum; using 4 KB pages";
     }
@@ -103,23 +129,27 @@ PinnedArena::PinnedArena(uint64_t bytes, uint64_t slice) : PinnedArena(bytes, un
     if (slice_bytes) slice_bytes = slice;   // sliced registration: record the uniform size
 }
 
-PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : capacity(bytes) {
+PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
+                         uint64_t max_pinned_bytes) : capacity(bytes) {
     if (bytes == 0) return;
     base = reserve(bytes, backing, note);
 
     // Register with CUDA BEFORE any page is touched: cudaHostRegister pins what is resident now, and a region
     // that has already been faulted in page by page is far more expensive to register and may fail outright.
     if (base) {
-        const cudaError_t e = cudaHostRegister(base, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped);
-        if (e == cudaSuccess) {
+        const bool capped = max_pinned_bytes > 0 && max_pinned_bytes < bytes && bounds.size() >= 2;
+        const cudaError_t e = capped ? cudaSuccess :
+            cudaHostRegister(base, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped);
+        if (!capped && e == cudaSuccess) {
             note = "cudaHostRegister PORTABLE ok; " + note;
             registered_bytes = bytes;
-        } else if (bounds.size() >= 2 && clear_error()) {
+        } else if (bounds.size() >= 2 && (capped || clear_error())) {
             // Plan v0.3 P5: the whole range is refused, so pin it slice by slice from the start.  The rest stays
             // resident through the working-set lock below.  (P6: slices may differ in size, one per layer.)
             slice_bytes = 1;   // sliced; the uniform constructor records the size
             for (size_t i = 0; i + 1 < bounds.size(); ++i) {
                 const uint64_t off = bounds[i], n = bounds[i + 1] - bounds[i];
+                if (capped && (off > max_pinned_bytes || n > max_pinned_bytes - off)) break;
                 if (cudaHostRegister((uint8_t*) base + off, (size_t) n, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
                     (void) cudaGetLastError();
                     break;
@@ -128,7 +158,9 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : 
                 registered_bytes = off + n;
                 ++registered_slices;
             }
-            note = "cudaHostRegister of the whole arena FAILED (" + std::string(cudaGetErrorString(e)) + "); " +
+            note = (capped ? "cudaHostRegister limited to " + std::to_string(max_pinned_bytes >> 30) +
+                             " GiB for CUDA1; " :
+                             "cudaHostRegister of the whole arena FAILED (" + std::string(cudaGetErrorString(e)) + "); ") +
                    std::to_string(registered_slices) + " slices pinned (" + std::to_string(registered_bytes >> 30) +
                    " GiB); " + note;
             if (registered_bytes < bytes) {

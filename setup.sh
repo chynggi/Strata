@@ -4,10 +4,17 @@
 # The Linux environment is .venv-linux, not .venv, so a dual-boot PC can share this folder with Windows
 # (which keeps its own .venv) without either side overwriting the other.
 cd "$(dirname "$0")" || exit 1
+# Python 3.10+ that can make a venv WITH pip: Debian/Ubuntu ship `venv` without `ensurepip` (that is the separate
+# python3-venv package), and a venv made without it has no pip
+ok_py() { "$1" -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; }
+# a .venv-linux from an earlier run that failed half-way has a python but no pip: start it again
+if [ -x .venv-linux/bin/python ] && ! .venv-linux/bin/python -m pip --version >/dev/null 2>&1; then
+  rm -rf .venv-linux
+fi
 if [ ! -x .venv-linux/bin/python ]; then
   PY=""
   for c in python3 python; do
-    if command -v $c >/dev/null 2>&1 && $c -c 'import sys, venv; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    if command -v $c >/dev/null 2>&1 && ok_py $c; then
       PY=$c; break
     fi
   done
@@ -21,12 +28,13 @@ if [ ! -x .venv-linux/bin/python ]; then
       sudo pacman -S --noconfirm python python-pip
     fi
     PY=python3
-    if ! $PY -c 'import sys, venv; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-      echo "Please install Python 3.10 or newer (with venv), then run ./setup.sh again."
+    if ! ok_py $PY; then
+      echo "Please install Python 3.10 or newer with venv (Ubuntu/Debian: sudo apt install python3-venv), then run"
+      echo "./setup.sh again."
       exit 1
     fi
   fi
   # a private environment inside this folder (system Python stays untouched; newer distros refuse global pip)
-  $PY -m venv .venv-linux || { echo "could not create .venv-linux: sudo apt install python3-venv"; exit 1; }
+  $PY -m venv .venv-linux || { rm -rf .venv-linux; echo "could not create .venv-linux: sudo apt install python3-venv"; exit 1; }
 fi
 exec .venv-linux/bin/python setup.py "$@"
