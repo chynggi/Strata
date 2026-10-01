@@ -354,7 +354,7 @@ def main() -> int:
         layout.append((l, ts[0].type_id, ts[2].type_id, offset, blob, ts))
         offset += blob * n_expert
     # written under a temporary name and renamed last: setup.py takes an existing native_experts.txt as a finished
-    # pack, so a run stopped halfway (or while writing experts.bin) must not leave one behind
+    # pack, so a run stopped halfway (or while writing experts.bin) must not leave one behind (upstream #172)
     txt = out / "native_experts.txt"
     txt_part = out / "native_experts.txt.part"
     with open(txt_part, "w", encoding="utf-8", newline="\n") as fo:

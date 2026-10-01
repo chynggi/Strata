@@ -56,6 +56,11 @@ Then, if there are conflicts:
 - **`setup.py` / model choice**: upstream picks sizes from `MODELS`; the fork uses `fam.get("sizes") or
   {... MODELS ...}` and passes `--compat-bf16` for families that set `compat_bf16`.
 - **`setup.py` / config names**: `strata-{CFG_PREFIX}{tag}` for the config and log.
+- **`setup.py` / `MODELS[model]` in `main()`**: upstream's new code reads `MODELS[model]`; in `main()` it is the
+  fork's `sizes[model]` (the fork's families have sizes MODELS does not, e.g. `IQ2_M`). The low-RAM helpers
+  (`low_ram_*`) stay on `MODELS`, and the low-RAM mode is off for families that carry their own `sizes`.
+- **`setup.py` / HIP engine**: upstream's `build_engine_hip` and `ensure_engine_for` write `ROOT / "engine"`; that
+  is `ENGINE_DIR` (HIP is Linux-only, so `engine-linux/`).
 - **`setup.sh`**: the environment is `.venv-linux`, not `.venv`.
 - **`tools/iq_pack.py`**: keep upstream's `n_expert` and `--compat-bf16`; keep the fork's
   `served_natively` / `dequant_bf16` fallback in the per-tensor loop.
