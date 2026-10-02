@@ -1,6 +1,6 @@
 #!/bin/sh
 # Strata for Linux: the first run installs everything and starts the model; later runs just start it.
-# Needs only an NVIDIA driver (or, experimental: an AMD RX 7900 XT/XTX with the amdgpu driver, see docs/AMD_HIP.md).
+# Needs only an NVIDIA driver (or, for an AMD Radeon card, the kernel's amdgpu driver: see docs/AMD_HIP.md).
 # Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
 # The Linux environment is .venv-linux, not .venv, so a dual-boot PC can share this folder with Windows
 # (which keeps its own .venv) without either side overwriting the other.

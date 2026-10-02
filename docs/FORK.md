@@ -9,8 +9,8 @@ resolve conflicts the same way every time, and so nothing upstream adds is dropp
 | Area | Files | What it does |
 | --- | --- | --- |
 | Uncensored models | `setup.py` (`FAMILIES`: `orca`, `mrad`, `rvn`), `tools/ple_key_bf16.py`, `tools/iq_pack.py` | One-click install of community "abliterated" GGUFs. `orca` is gated (a Hugging Face token is asked for); each family carries its own `sizes` dict. |
-| Community-GGUF packing | `tools/iq_pack.py` | A PLE key quantized to anything but Q2_0 is stored as BF16; quantized tensors the engine cannot serve natively are dequantized to BF16; a layer whose experts straddle two shards is written to `experts.bin`. Packs are written under `.part` names and renamed last. |
-| Dual-boot layout | `setup.py` (`ENGINE_DIR`, `BUILD_DIR`, `VISION_BUILD_DIR`, `CFG_PREFIX`), `setup.sh`, `.gitignore` | Windows and Linux share one folder: each OS keeps its own engine (`engine/` vs `engine-linux/`), CMake cache (`build*/` vs `build-linux*/`), Python env (`.venv` vs `.venv-linux/`), run config and log (`strata-*.json` vs `strata-linux-*.json`). Model data stays shared. |
+| Community-GGUF packing | `tools/iq_pack.py`, `tools/ple_key_bf16.py` | A PLE key quantized to anything but Q2_0 is stored as BF16 (`ple_key_bf16.py`, before packing); quantized tensors the engine cannot serve natively (e.g. Q2_K) are dequantized to BF16 (`served_natively` / `dequant_bf16`). Layers split across shards and atomic pack writes are upstream's since 0.1.34 (`native_experts.txt` v4). |
+| Dual-boot layout | `setup.py` (`engine_dir()`, `build_dir()`, `vision_build_dir()`, `CFG_PREFIX`), `setup.sh`, `.gitignore` | Windows and Linux share one folder: each OS keeps its own engine (`engine/` vs `engine-linux/`), CMake cache (`build*/` vs `build-linux*/`), Python env (`.venv` vs `.venv-linux/`), run config and log (`strata-*.json` vs `strata-linux-*.json`). Model data stays shared. |
 | Line endings | `.gitattributes`, `.gitignore` | `* text=auto eol=lf` so a Windows editor cannot turn the tree into CRLF (an earlier commit did, and every later merge conflicted on every line). |
 
 Fork-only files (upstream has none of these, so they never conflict): `docs/FORK.md`,
@@ -42,7 +42,7 @@ scripts/merge-upstream.sh          # or: scripts/merge-upstream.ps1
 Then, if there are conflicts:
 
 1. Resolve them, keeping both sides where upstream only added code and the fork only renamed or added
-   (the fork's families, `ENGINE_DIR`/`CFG_PREFIX`, and its `iq_pack.py` helpers are the usual places).
+   (the fork's families, `engine_dir()`/`CFG_PREFIX`, and its `iq_pack.py` helpers are the usual places).
 2. `git add` the resolved files and `git commit` - rerere records each resolution for next time.
 3. Run the Python tests: `python -m unittest discover -s tools -p "test_*.py"`.
 4. Do not push unresolved forks of upstream's own files without checking this file.
@@ -50,20 +50,32 @@ Then, if there are conflicts:
 ### Resolving the usual conflicts
 
 - **`setup.py` / `FAMILIES`**: keep upstream's new families and the fork's `orca` / `mrad` / `rvn`; take
-  upstream's new fields (multi-GPU, calibration) and keep `ENGINE_DIR`, `BUILD_DIR`, `CFG_PREFIX`.
+  upstream's new fields (multi-GPU, calibration) and keep `engine_dir()`, `build_dir()`, `CFG_PREFIX`.
+  The fork's families' Hugging Face revisions are pinned in the `HF_REVISIONS.update` block below upstream's.
 - **`setup.py` / engine paths**: upstream writes `ROOT / "engine"` and `ROOT / "build"`; those are the
-  fork's `ENGINE_DIR` and `BUILD_DIR`.
+  fork's `engine_dir()` and `build_dir()` - also in code that merged without a conflict (grep for them).
+  They are functions so they follow `ROOT`: the tests point `ROOT` at a temporary folder, and a constant
+  kept the real `engine/`, which the tests' fake engines overwrote.
 - **`setup.py` / model choice**: upstream picks sizes from `MODELS`; the fork uses `fam.get("sizes") or
   {... MODELS ...}` and passes `--compat-bf16` for families that set `compat_bf16`.
 - **`setup.py` / config names**: `strata-{CFG_PREFIX}{tag}-vision|novision` for the config and log,
   `run-{tag}-vision|novision` for the start script (one of each per images setting).
 - **`setup.py` / `MODELS[model]` in `main()`**: upstream's new code reads `MODELS[model]`; in `main()` it is the
-  fork's `sizes[model]` (the fork's families have sizes MODELS does not, e.g. `IQ2_M`). The low-RAM helpers
+  fork's `sizes[model]` (helpers that read it take a `sizes=MODELS` argument: `confirm_paging`, `ctx_ram_need`,
+  `ram_ctx`) (the fork's families have sizes MODELS does not, e.g. `IQ2_M`). The low-RAM helpers
   (`low_ram_*`) stay on `MODELS`, and the low-RAM mode is off for families that carry their own `sizes`.
-- **`setup.py` / HIP engine**: upstream's `build_engine_hip` and `ensure_engine_for` write `ROOT / "engine"`; that
-  is `ENGINE_DIR` (HIP is Linux-only, so `engine-linux/`).
+- **`setup.py` / HIP engine**: upstream's `build_engine_hip`, `get_prebuilt_hip` and `ensure_engine_for` write
+  `ROOT / "engine"`; that is `engine_dir()` (`engine/` on Windows, `engine-linux/` on Linux).
+- **`setup.py` / `download`**: the fork's `token=` is passed only for a gated model, so upstream's tests' fake
+  `download(url, dst, what=None)` keeps working. `write_run_script` keeps upstream's three arguments (the
+  vision suffix comes from the config's name).
 - **`setup.sh`**: the environment is `.venv-linux`, not `.venv`.
-- **`tools/iq_pack.py`**: keep upstream's `n_expert` and `--compat-bf16`; keep the fork's
-  `served_natively` / `dequant_bf16` fallback in the per-tensor loop.
+- **`tools/iq_pack.py`**: take upstream's file (FORM conversions, `native_experts.txt` v4, the experts.bin
+  sidecar), then keep the fork's `served_natively` / `dequant_bf16` (`ple_key_bf16.py` imports it) and the
+  BF16 fallback in `index_standalone`'s loop for a quantized tensor with no FORM entry that the engine cannot
+  serve; `NATIVE_TYPES` follows `native_mmvq_supported` in `src/kernels/cuda/native_mmvq.cu`.
+- **Tests**: `tools/test_setup_golden.json` has the fork's `-vision|novision` log names;
+  `tools/test_setup_unsloth.py` reads `strata-unsloth-ud-q4_k_xl-novision.json`; `tools/strata_mcp.py`'s
+  `FALLBACK_FAMILIES` lists the fork's families.
 - **`docs/DETAILS.md`, `README.md`**: upstream's `Strata-data` text stays; the fork's dual-boot section and
   uncensored table stay.
