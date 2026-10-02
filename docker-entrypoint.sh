@@ -26,7 +26,10 @@ LOW_RAM="${LOW_RAM:-auto}"      # on: the experts come from the pack's experts.b
 # the entry point could rebuild from env vars. qwen has an empty family tag.
 case "$FAMILY" in qwen) prefix="" ;; *) prefix="${FAMILY}-" ;; esac
 tag="${prefix}$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
-cfg="$STRATA_DATA/config/strata-$tag.json"
+# setup.py names it strata-linux-<tag>-vision|novision.json (Linux prefix, images or not)
+case "$VISION" in no|none) images=novision ;; *) images=vision ;; esac
+name="strata-linux-$tag-$images.json"
+cfg="$STRATA_DATA/config/$name"
 mkdir -p "$STRATA_DATA/config"
 
 # REINSTALL is only needed to change settings for a model that is already set up
@@ -47,9 +50,9 @@ if [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
   if [ -n "$GPU" ]; then set -- "$@" --gpu "$GPU"; fi
   if [ -n "$LAYER_SPLIT" ]; then set -- "$@" --layer-split "$LAYER_SPLIT"; fi
   .venv/bin/python setup.py --setup --yes "$@"
-  [ -e "/opt/strata/strata-$tag.json" ] && { cmp -s "/opt/strata/strata-$tag.json" "$cfg" || cp -f "/opt/strata/strata-$tag.json" "$cfg"; }
+  [ -e "/opt/strata/$name" ] && { cmp -s "/opt/strata/$name" "$cfg" || cp -f "/opt/strata/$name" "$cfg"; }
 else
-  [ -e "/opt/strata/strata-$tag.json" ] || ln -s "$cfg" "/opt/strata/strata-$tag.json"
+  [ -e "/opt/strata/$name" ] || ln -s "$cfg" "/opt/strata/$name"
 fi
 
 # Later starts skip straight here: setup.py finds the installed config and

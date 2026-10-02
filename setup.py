@@ -18,7 +18,7 @@ What the first run does (each step is skipped when it is already done):
      it installs the build tools (asks first) and compiles the engine for your GPU
   5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
-  7. writes run-<model>.bat / run-<model>.sh and starts the model
+  7. writes run-<model>-vision|novision.bat / .sh and starts the model
 
 Uncensored models (this fork): --family orca (gated: a Hugging Face token), mrad or rvn - community GGUFs of
 refusal-removed builds, each with its own sizes (orca IQ2_M is the one that fits 64 GB of RAM).
@@ -1473,7 +1473,7 @@ def data_folder(requested: str | None) -> tuple:
                 (folder / d).rmdir()                    # empty now
             except OSError:
                 pass
-        for c in folder.glob("strata-*.json"):
+        for c in run_configs(folder):
             repoint_config(c, folder, dest)
         if has_data(folder):
             elsewhere.append(folder)                    # in use, or a copy the data folder already has
@@ -1485,11 +1485,17 @@ def data_folder(requested: str | None) -> tuple:
     return dest, elsewhere
 
 
+def run_configs(folder: Path) -> list:
+    """The run configs in a folder: strata-*.json, but not the chat settings the server keeps beside each one
+    (strata-<model>.shared-settings.json), which would otherwise be offered as a model to start."""
+    return [p for p in folder.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")]
+
+
 def previous_config(elsewhere_first: list, settings: dict):
     """The most recently used model config of another Strata folder on this PC, for a folder that has none yet."""
     cands = []
     for folder in [*elsewhere_first, *other_installs(settings)]:
-        cands += list(folder.glob("strata-*.json"))
+        cands += run_configs(folder)
     cands = [c for c in dict.fromkeys(cands) if c.is_file()]
     return max(cands, key=lambda p: p.stat().st_mtime) if cands else None
 
@@ -1497,7 +1503,7 @@ def previous_config(elsewhere_first: list, settings: dict):
 def choices_from_config(cfg_path: Path) -> dict:
     """The setup answers a config was written with (family, size, context, KV, images, projection, network)."""
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-    tag = cfg_path.stem[len("strata-"):]
+    tag = re.sub(r"-(no)?vision$", "", cfg_path.stem[len("strata-"):])
     family = next((f for f, d in FAMILIES.items() if d["tag"] and tag.startswith(d["tag"])), "qwen")
     model = tag.split("-")[-1].upper()
     a = cfg.get("args", [])
@@ -1505,7 +1511,7 @@ def choices_from_config(cfg_path: Path) -> dict:
     vis = cfg.get("vision")
     esp = val("--control-vector-scaled")
     esp_path = esp.rsplit(":", 1)[0] if esp else None
-    return {"family": family, "model": model if model in MODELS else None,
+    return {"family": family, "model": model if model in FAMILIES[family].get("sizes", MODELS) else None,
             "context": int(val("--max-context")) if val("--max-context") else None,
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
@@ -1526,9 +1532,15 @@ def find_in(roots: list, rel: str):
 def installed_configs():
     """The run configs written for this OS. In a dual-boot shared folder Windows keeps strata-<model>.json and
     Linux keeps strata-linux-<model>.json, so neither picks up a config that points at the other OS's engine."""
-    all_cfgs = list(ROOT.glob("strata-*.json"))
+    all_cfgs = run_configs(ROOT)
     mine = [p for p in all_cfgs if p.name.startswith("strata-linux-") == (not WIN)]
     return sorted(mine, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def config_label(c: Path) -> str:
+    """A config's line in the 'which one?' list: the model and whether it takes images (two configs of one model)."""
+    cfg = json.loads(c.read_text(encoding="utf-8-sig"))
+    return f"{cfg.get('model_name', c.stem)} ({'vision' if cfg.get('vision') else 'novision'})"
 
 
 def source_version() -> str:
@@ -1759,15 +1771,16 @@ def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     return cfg
 
 
-def write_run_script(model, cfg_path, port):
+def write_run_script(model, cfg_path, port, vision):
     serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
              "--port", str(port), "--open"]
+    name = f"run-{model.lower()}-{'novision' if vision == 'none' else 'vision'}"
     if WIN:
-        script = ROOT / f"run-{model.lower()}.bat"
+        script = ROOT / f"{name}.bat"
         script.write_text("@echo off\r\ntitle Strata " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
                           " ".join(f'"{x}"' for x in serve) + "\r\nif errorlevel 1 pause\r\n", encoding="utf-8")
     else:
-        script = ROOT / f"run-{model.lower()}.sh"
+        script = ROOT / f"{name}.sh"
         script.write_text("#!/bin/sh\ncd \"" + str(ROOT) + "\"\nexec " + " ".join(f'"{x}"' for x in serve) + "\n",
                           encoding="utf-8")
         script.chmod(0o755)
@@ -1918,7 +1931,7 @@ def main() -> int:
         if len(have) > 1:
             say()
             for i, c in enumerate(have, 1):
-                say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
+                say(f"  {i}) {config_label(c)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
         calibrate_config(pick_cfg)
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
@@ -1931,7 +1944,7 @@ def main() -> int:
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab})
         say()
         for i, c in enumerate(have, 1):
-            say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
+            say(f"  {i}) {config_label(c)}")
         say(f"  {len(have) + 1}) install another model / change settings")
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
@@ -2368,8 +2381,9 @@ def main() -> int:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
                  "--cvec-mode", "project", "--cvec-dir", "per-layer"]
+    stem = f"strata-{CFG_PREFIX}{tag.lower()}-{'novision' if vision == 'none' else 'vision'}"   # config and log
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-"model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{CFG_PREFIX}{tag.lower()}.log"),
+"model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"{stem}.log"),
            "lib_dirs": lib_dirs, "port": port}
     if hip:
         cfg["backend"] = "hip"
@@ -2399,7 +2413,7 @@ def main() -> int:
                          "gpu": vision == "gpu", "max_tokens": VISION[vision]["max_tokens"]}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
-    cfg_path = ROOT / f"strata-{CFG_PREFIX}{tag.lower()}.json"
+    cfg_path = ROOT / f"{stem}.json"
     cal = None if hip else saved_calibration(cfg)     # tools/calibrate.py is NVIDIA-only for now
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))
@@ -2407,7 +2421,7 @@ def main() -> int:
         cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
         ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
     cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-    script = write_run_script(tag, cfg_path, port)
+    script = write_run_script(tag, cfg_path, port, vision)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
     if cal is None and not hip and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 5-10 minutes; the PC is busy "

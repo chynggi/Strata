@@ -263,7 +263,8 @@ START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-
 START-HERE.bat --calibrate                      tune the engine for this PC (about 5-10 minutes), then start
 ```
 
-With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
+With more than one model installed, it asks which one to start. `run-<model>-vision.bat` (or `run-<model>-novision.bat`, set up without images) starts a model directly.
+`MoreSimpleStart.bat` lists those start scripts and starts the one you pick.
 
 **Tuning for your PC (`--calibrate`, engine 0.1.19).** Three engine settings depend on the PC more than on the model:
 - the share of the experts missing from VRAM that are copied to the GPU instead of computed by the CPU
@@ -313,8 +314,8 @@ slowly, the engine prints a hint under its `loaded ... GiB at ...` line naming t
 ```
 
 The same questions, the same automatic install (it uses `sudo apt` for Python and, only if it has to compile,
-for the build tools), and the same start: `http://127.0.0.1:8080`. Later runs of `./setup.sh` (or `./run-<model>.sh`)
-start the model directly. Options as on Windows (`./setup.sh --setup`, `--model Q2_0 --yes`, `--gguf-dir /data/Q2_0`).
+for the build tools), and the same start: `http://127.0.0.1:8080`. Later runs of `./setup.sh` (or `./run-<model>-vision.sh` / `-novision.sh`)
+start the model directly. `./MoreSimpleStart.sh` lists the start scripts and starts the one you pick. Options as on Windows (`./setup.sh --setup`, `--model Q2_0 --yes`, `--gguf-dir /data/Q2_0`).
 Terminal chat: `.venv-linux/bin/python chat.py` (Linux; the environment is `.venv-linux/`, not `.venv/`, so a dual-boot
 PC can share this folder with Windows).
 

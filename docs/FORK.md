@@ -55,7 +55,8 @@ Then, if there are conflicts:
   fork's `ENGINE_DIR` and `BUILD_DIR`.
 - **`setup.py` / model choice**: upstream picks sizes from `MODELS`; the fork uses `fam.get("sizes") or
   {... MODELS ...}` and passes `--compat-bf16` for families that set `compat_bf16`.
-- **`setup.py` / config names**: `strata-{CFG_PREFIX}{tag}` for the config and log.
+- **`setup.py` / config names**: `strata-{CFG_PREFIX}{tag}-vision|novision` for the config and log,
+  `run-{tag}-vision|novision` for the start script (one of each per images setting).
 - **`setup.py` / `MODELS[model]` in `main()`**: upstream's new code reads `MODELS[model]`; in `main()` it is the
   fork's `sizes[model]` (the fork's families have sizes MODELS does not, e.g. `IQ2_M`). The low-RAM helpers
   (`low_ram_*`) stay on `MODELS`, and the low-RAM mode is off for families that carry their own `sizes`.
