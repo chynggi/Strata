@@ -168,8 +168,7 @@ FAMILIES = {
               "license": "Swift Open License 1.0: https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF"},
     # Uncensored (this fork): community GGUFs of refusal-removed builds, not GSQ-RCO, so each has its own sizes -
     # only the ones whose tensor types the engine runs (i-quant experts, an IQ4_NL PLE table, BF16-exact routers).
-    # Their experts are larger than the GSQ-RCO ones: "arena_gb" is the RAM they take (all pinned).  "extra_gb" is
-    # the disk that preparing them takes once: the PLE key made BF16 (a shard rewritten).
+    # Their experts are larger than the GSQ-RCO ones: "arena_gb" is the RAM they take (all pinned).
     "orca": {"title": "Uncensored (OrcaRouter)", "by": "orcarouter's abliterated Qwen3.8-Flash-Next",
              "about": "refusals removed; GATED: needs a free Hugging Face account + token",
              "hf": hf("orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF"),
@@ -180,9 +179,9 @@ FAMILIES = {
              "compat_bf16": True,
              "license": "Apache 2.0; safety alignment removed - you are responsible for its use",
              "sizes": {"IQ2_M": {"about": "2-bit i-quant, fits 64 GB of RAM", "download_gb": 80.1, "ram_gb": 62,
-                                 "arena_gb": 48.4, "extra_gb": 50},
+                                 "arena_gb": 48.4},
                        "IQ3_XXS": {"about": "3-bit i-quant, better quality", "download_gb": 85.2, "ram_gb": 68,
-                                   "arena_gb": 53.5, "extra_gb": 45}}},
+                                   "arena_gb": 53.5}}},
     "mrad": {"title": "Uncensored (mradermacher)", "by": "imatrix quants of the same OrcaRouter weights",
              "about": "refusals removed; not gated; needs ~72 GB of RAM",
              "hf": hf("mradermacher/Qwen3.8-Flash-Next-Uncensored-i1-GGUF"),
@@ -191,8 +190,7 @@ FAMILIES = {
              "mmproj": "Qwen3.8-Flash-Next-Uncensored.mmproj-f16.gguf", "name": "mrad-uncensored",
              "license": "Apache 2.0; safety alignment removed - you are responsible for its use",
              "compat_bf16": True,
-             "sizes": {"IQ3_S": {"about": "3-bit i-quant", "download_gb": 88.9, "ram_gb": 72, "arena_gb": 57.3,
-                                 "extra_gb": 90}}},
+             "sizes": {"IQ3_S": {"about": "3-bit i-quant", "download_gb": 88.9, "ram_gb": 72, "arena_gb": 57.3}}},
     "rvn": {"title": "Uncensored (RVN)", "by": "0bserverx's abliterated Qwen3.8-Flash-Next (RVN V6)",
             "about": "refusals removed, a different method; not gated; needs ~70 GB of RAM",
             "hf": hf("0bserverx/RVN-Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF"),
@@ -201,8 +199,7 @@ FAMILIES = {
             "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "rvn-uncensored",
             "license": "Qwen Community License 1.0; safety alignment removed - you are responsible for its use",
             "compat_bf16": True,
-            "sizes": {"IQ3_XS": {"about": "3-bit i-quant", "download_gb": 86.0, "ram_gb": 70, "arena_gb": 54.4,
-                                  "extra_gb": 56}}},
+            "sizes": {"IQ3_XS": {"about": "3-bit i-quant", "download_gb": 86.0, "ram_gb": 70, "arena_gb": 54.4}}},
     # ISTA-DASLab's expert-pruned release: half of each layer's experts removed, chosen for code, agentic tool use and
     # vision; its shard 2 (the n-gram table) and vision encoder are the original's files, shared with it
     "coder": {"title": "Qwen3.8-Flash-Next Coder", "by": "ISTA-DASLab's coding version",
@@ -3137,7 +3134,7 @@ def main() -> int:
     to_fetch = 0 if a.gguf_dir or have_model else max(sizes[model]["download_gb"] - on_disk, 0)
     need = to_fetch + 8 + \
         (40 if model == "Q2_0" and avx512 and family == "qwen" else 0) + (1 if vision != "none" else 0) + \
-        (0 if (ROOT / "packs" / tag.lower() / "native_experts.txt").exists() else sizes[model].get("extra_gb", 0)) + \
+\
         (sizes[model]["arena_gb"] + 1 if low_ram and not (model == "Q2_0" and avx512 and family == "qwen") else 0)
     if free_gb(models_dir) < need:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
@@ -3238,8 +3235,7 @@ def main() -> int:
                  "--out", str(pack)], env=env)   # writes <pack>/tokenizer/
     elif not (pack / "native_experts.txt").exists() or not (pack / "tokenizer" / "vocab.json").exists():
         # every tensor as the GGUF stores it; the experts are read from the GGUF at start (seconds to build).
-        # A PLE key quantized to something other than Q2_0 (community GGUFs) is made BF16 first: once, in place
-        run([sys.executable, str(ROOT / "tools" / "ple_key_bf16.py"), "--gguf", str(shards[0])], env=env)
+        # A community GGUF's quantized PLE key becomes BF16 in the pack (--compat-bf16; the engine keeps that row, #326)
         # (UD-Q4_K_XL: --compat-bf16 - its Q8_0 hyper-connection projections become BF16, the form the engine reads)
         cmd = [sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack),
                *fam.get("pack_args", [])]

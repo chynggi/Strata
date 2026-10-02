@@ -8,14 +8,14 @@ resolve conflicts the same way every time, and so nothing upstream adds is dropp
 
 | Area | Files | What it does |
 | --- | --- | --- |
-| Uncensored models | `setup.py` (`FAMILIES`: `orca`, `mrad`, `rvn`), `tools/ple_key_bf16.py`, `tools/iq_pack.py` | One-click install of community "abliterated" GGUFs. `orca` is gated (a Hugging Face token is asked for); each family carries its own `sizes` dict. |
-| Community-GGUF packing | `tools/iq_pack.py`, `tools/ple_key_bf16.py` | A PLE key quantized to anything but Q2_0 is stored as BF16 (`ple_key_bf16.py`, before packing); quantized tensors the engine cannot serve natively (e.g. Q2_K) are dequantized to BF16 (`served_natively` / `dequant_bf16`). Layers split across shards and atomic pack writes are upstream's since 0.1.34 (`native_experts.txt` v4). |
+| Uncensored models | `setup.py` (`FAMILIES`: `orca`, `mrad`, `rvn`), `tools/iq_pack.py` | One-click install of community "abliterated" GGUFs. `orca` is gated (a Hugging Face token is asked for); each family carries its own `sizes` dict. |
+| Community-GGUF packing | `tools/iq_pack.py` | `--compat-bf16` (the families' `compat_bf16`) makes a quantized PLE key BF16 in the pack, which the engine keeps (#326; verified on OrcaRouter IQ2_M, whose IQ2_S key once needed the shard rewritten by the removed `tools/ple_key_bf16.py`); quantized tensors the engine cannot serve natively (e.g. Q2_K) are dequantized to BF16 (`served_natively` / `dequant_bf16`). Layers split across shards and atomic pack writes are upstream's since 0.1.34 (`native_experts.txt` v4). |
 | Dual-boot layout | `setup.py` (`engine_dir()`, `build_dir()`, `vision_build_dir()`, `CFG_PREFIX`), `setup.sh`, `.gitignore` | Windows and Linux share one folder: each OS keeps its own engine (`engine/` vs `engine-linux/`), CMake cache (`build*/` vs `build-linux*/`), Python env (`.venv` vs `.venv-linux/`), run config and log (`strata-*.json` vs `strata-linux-*.json`). Model data stays shared. |
 | MCP server | `tools/strata_mcp.py`, `tools/test_fork_mcp.py` | The dual-boot layout (`VENV`, `ENGINE`, `CFG_PREFIX`): this OS's run configs only (not `*.shared-settings.json`), model ids `<tag>-vision|novision` with their `run-<id>` scripts (`<tag>` alone finds the latest), and the uncensored families' own `sizes` (`size_table`); a gated family's install plan says it needs `HF_TOKEN`. |
 | Line endings | `.gitattributes`, `.gitignore` | `* text=auto eol=lf` so a Windows editor cannot turn the tree into CRLF (an earlier commit did, and every later merge conflicted on every line). |
 
 Fork-only files (upstream has none of these, so they never conflict): `docs/FORK.md`,
-`scripts/merge-upstream.sh`, `scripts/merge-upstream.ps1`, `tools/ple_key_bf16.py`, `tools/test_fork_mcp.py`,
+`scripts/merge-upstream.sh`, `scripts/merge-upstream.ps1`, `tools/test_fork_mcp.py`,
 `MoreSimpleStart.*`.
 
 ## Keeping merges small
@@ -73,7 +73,7 @@ Then, if there are conflicts:
   vision suffix comes from the config's name).
 - **`setup.sh`**: the environment is `.venv-linux`, not `.venv`.
 - **`tools/iq_pack.py`**: take upstream's file (FORM conversions, `native_experts.txt` v4, the experts.bin
-  sidecar), then keep the fork's `served_natively` / `dequant_bf16` (`ple_key_bf16.py` imports it) and the
+  sidecar), then keep the fork's `served_natively` / `dequant_bf16` and the
   BF16 fallback in `index_standalone`'s loop for a quantized tensor with no FORM entry that the engine cannot
   serve; `NATIVE_TYPES` follows `native_mmvq_supported` in `src/kernels/cuda/native_mmvq.cu`.
 - **Tests**: `tools/test_setup_golden.json` has the fork's `-vision|novision` log names;

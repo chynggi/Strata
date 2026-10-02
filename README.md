@@ -128,8 +128,8 @@ is faster, larger is a bit smarter.
   **OrcaRouter is gated:** sign in on its page and click *Agree and access repository*, make a *Read* token at
   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), then either set `HF_TOKEN`, run
   `hf auth login`, or paste the token when the setup asks. The other two download without an account.
-  Preparing one the first time takes 45-90 GB more disk (the setup stores its PLE key as BF16, which rewrites one
-  of the files) and a few minutes.
+  Preparing one the first time takes a few minutes and ~1.5 GB of disk for its pack (the model files stay as
+  downloaded).
   Measured: OrcaRouter IQ2_M on an RTX 3060 (12 GB), a Core i5-10400 (AVX2) and 64 GB of RAM writes ~21 tokens/s.
   Without questions: `START-HERE.bat --family orca --model IQ2_M` (or `--family mrad` / `--family rvn`).
 
