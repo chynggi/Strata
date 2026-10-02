@@ -45,6 +45,11 @@ WIN = os.name == "nt"
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 8080
 STATE_DIR = ".strata-mcp"                             # in the Strata folder (git-ignored)
+# The fork's dual-boot layout (docs/FORK.md, setup.py's engine_dir / CFG_PREFIX): Linux keeps its own environment,
+# engine and run configs (strata-linux-<tag>-vision|novision.json), so one folder serves both systems.
+VENV = ".venv" if WIN else ".venv-linux"
+ENGINE = "engine" if WIN else "engine-linux"
+CFG_PREFIX = "" if WIN else "linux-"
 
 # What setup.py offers, used only when setup.py cannot be imported (the numbers are setup's MODELS / FAMILIES /
 # CONTEXTS; tools/test_strata_mcp.py checks they still match).
@@ -427,9 +432,14 @@ class Strata:
             return s.MODELS, s.FAMILIES, list(s.CONTEXTS), "setup.py"
         return FALLBACK_MODELS, FALLBACK_FAMILIES, FALLBACK_CONTEXTS, "built-in table (setup.py not importable)"
 
-    @staticmethod
-    def sizes_of(models, family) -> list:
-        return [m for m in models if family in models[m].get("families", ("qwen", "swift"))]
+    def size_table(self, models, family) -> dict:
+        """setup's sizes for a family: the family's own (the fork's community GGUFs), else MODELS' for it."""
+        fam = self.tables()[1].get(family) or {}
+        return fam.get("sizes") or {m: d for m, d in models.items()
+                                    if family in d.get("families", ("qwen", "swift"))}
+
+    def sizes_of(self, models, family) -> list:
+        return list(self.size_table(models, family))
 
     # ---- paths
     def settings_path(self) -> Path:
@@ -453,7 +463,7 @@ class Strata:
         return any(is_inside(p, r) for r in self.allowed_roots())
 
     def venv_python(self) -> Path:
-        return self.root / ".venv" / ("Scripts/python.exe" if WIN else "bin/python")
+        return self.root / VENV / ("Scripts/python.exe" if WIN else "bin/python")
 
     def run_python(self) -> str:
         return self.python_override or str(self.venv_python())
@@ -480,7 +490,22 @@ class Strata:
 
     # ---- what is installed
     def configs(self) -> list[Path]:
-        return sorted(self.root.glob("strata-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        """This OS's run configs, the most recently used first - not the other OS's (dual boot) and not the chat
+        settings the server keeps beside each one (strata-<tag>.shared-settings.json)."""
+        mine = [p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")
+                and p.name.startswith("strata-linux-") == (not WIN)]
+        return sorted(mine, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    @staticmethod
+    def config_tag(path: Path) -> str:
+        """A run config's model id: strata-<prefix><tag>-vision|novision.json -> <tag>-vision|novision (its start
+        script is run-<that>.bat / .sh)."""
+        return path.stem[len("strata-" + CFG_PREFIX):]
+
+    @staticmethod
+    def base_tag(tag: str) -> str:
+        """The model a config is of, without its images setting: orca-iq2_m-vision -> orca-iq2_m."""
+        return re.sub(r"-(no)?vision$", "", tag)
 
     @staticmethod
     def read_config(path: Path) -> dict:
@@ -496,7 +521,7 @@ class Strata:
 
         def val(k):
             return a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else None
-        tag = path.stem[len("strata-"):]
+        tag = self.config_tag(path)
         missing = [p for p in [cfg.get("exe"), *[x for x in a if isinstance(x, str) and x.endswith(".gguf")]]
                    if not p or not Path(p).exists()]
         script = self.root / f"run-{tag}.{'bat' if WIN else 'sh'}"
@@ -518,9 +543,12 @@ class Strata:
         if not model:
             return have[0]                              # the most recently used, as setup starts it
         m = model.strip().lower()
-        exact = [c for c in have if c.stem[len("strata-"):] == m]
+        exact = [c for c in have if self.config_tag(c) == m]
         if exact:
             return exact[0]
+        base = [c for c in have if self.base_tag(self.config_tag(c)) == m]   # either images setting: the latest
+        if base:
+            return base[0]
         by_name = [c for c in have if str(self.read_config(c).get("model_name", "")).lower() == m]
         if by_name:
             return by_name[0]
@@ -528,10 +556,10 @@ class Strata:
         if len(ends) == 1:
             return ends[0]
         raise ToolError(f"no installed model {model!r}; installed: " +
-                        ", ".join(c.stem[len("strata-"):] for c in have))
+                        ", ".join(self.config_tag(c) for c in have))
 
     def engine_info(self) -> dict:
-        for d in ("engine",):
+        for d in (ENGINE,):
             try:
                 meta = json.loads((self.root / d / "BUILD.json").read_text())
                 return {"folder": d, "version": meta.get("version"), "source": meta.get("source"),
@@ -699,12 +727,13 @@ class Strata:
         ram = (hw or {}).get("ram_gb")
         usable = [g for g in (hw or {}).get("gpus", []) if g.get("usable")]
         vram = max((g["vram_gb"] for g in usable), default=0.0)
-        have = {c.stem[len("strata-"):] for c in self.configs()}
+        have = {self.base_tag(self.config_tag(c)) for c in self.configs()}
         out = []
         for f, fd in families.items():
             sizes = []
-            for m in self.sizes_of(models, f):
-                d = models[m]
+            table = self.size_table(models, f)
+            for m in table:
+                d = table[m]
                 tag = (fd.get("tag", "") + m).lower()
                 verdict = None
                 if ram is not None:
@@ -713,7 +742,7 @@ class Strata:
                         if d.get("budget"):
                             verdict = ("experimental: part of its experts in RAM, the rest read from the SSD"
                                        if ram >= d["ram_gb"] else "does not fit")
-                        elif S and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
+                        elif S and "sizes" not in fd and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
                             verdict = "fits in the low-RAM mode (slower: the GPU holds part of the experts)"
                     except Exception:                   # noqa: BLE001
                         pass
@@ -1220,11 +1249,12 @@ class Tools:
         sizes = s.sizes_of(models, family)
         if model not in sizes:
             raise ToolError(f"{families[family]['title']} has no {model}; its sizes: {', '.join(sizes)}")
+        sz = s.size_table(models, family)[model]       # the family's own sizes (the fork's), else MODELS'
         if context is None:
             usable = [g for g in hw.get("gpus", []) if g.get("usable")]
             vram = max((g["vram_gb"] for g in usable), default=12)
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
-            if models[model].get("budget"):
+            if sz.get("budget"):
                 context = 8192 if vram < 14 else 32768
         if vision in ("yes", "gpu", "cpu") and families[family].get("vision") is False:
             raise ToolError(f"images are not available with {families[family]['title']} yet: use vision=no")
@@ -1234,7 +1264,7 @@ class Tools:
         tag = (families[family].get("tag", "") + model)
         have_dir = target / "models" / tag
         partly = have_dir.is_dir() and any(have_dir.glob("*.gguf*"))
-        need = (8 if partly else models[model]["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
+        need = (8 if partly else sz["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
         free = s.disk_free(target)
         short = None
         if free is not None and free < need:
@@ -1253,11 +1283,11 @@ class Tools:
         fit = None
         ram = hw.get("ram_gb")
         if ram is not None:
-            need_ram = models[model]["ram_gb"]
+            need_ram = sz["ram_gb"]
             fit = "fits" if ram >= need_ram else f"needs ~{need_ram} GB of RAM, this PC has {ram:.0f} GB"
-        installed = (s.root / f"strata-{tag.lower()}.json").exists()
+        installed = any(s.base_tag(s.config_tag(c)) == tag.lower() for c in s.configs())
         plan = {"title": f"{families[family]['title']} {model}", "family": family, "model": model,
-                "context": context, "images": vision or "no", "download_gb": models[model]["download_gb"],
+                "context": context, "images": vision or "no", "download_gb": sz["download_gb"],
                 "partly_downloaded": partly, "ram": fit, "data_folder": str(target), "disk_free_gb": free,
                 "disk_needed_gb": round(need), "disk_short": short, "already_installed": installed,
                 "setup_command": ("START-HERE.bat " if WIN else "./setup.sh ") + " ".join(args),
@@ -1270,6 +1300,9 @@ class Tools:
             plan["license"] = families[family]["license"]
         if families[family].get("experimental"):
             plan["experimental"] = True
+        if families[family].get("gated"):              # setup runs with --yes: it cannot ask for the token
+            plan["gated"] = ("needs a Hugging Face token whose account accepted the terms at "
+                             f"{families[family]['gated']}: set HF_TOKEN or run `hf auth login` before the install")
         return plan, args
 
     def launch_install(self, plan: dict, args: list) -> dict:
@@ -1332,7 +1365,7 @@ class Tools:
                 raise ToolError(f"port {port} is used by another program; choose another port (port=...)")
             py = s.run_python()
             if not Path(py).exists():
-                raise ToolError("Strata's Python environment (.venv) is missing: run the install again")
+                raise ToolError(f"Strata's Python environment ({VENV}) is missing: run the install again")
             cmd = [py, str(s.root / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
                    "--port", str(port)]
             if gpu is not None:
@@ -1675,15 +1708,15 @@ def install_job(spec_path: str) -> int:
     py = Path(spec["python"])
     try:
         if spec.get("create_venv"):
-            venv = root / ".venv"
+            venv = root / VENV
             if py.exists() and subprocess.run([str(py), "-m", "pip", "--version"], capture_output=True).returncode:
-                print("strata-mcp: .venv has no pip (an earlier run stopped half-way): making it again", flush=True)
+                print(f"strata-mcp: {VENV} has no pip (an earlier run stopped half-way): making it again", flush=True)
                 shutil.rmtree(venv, ignore_errors=True)
             if not py.exists():
                 print(f"strata-mcp: creating Strata's Python environment in {venv} ...", flush=True)
                 r = subprocess.run([spec["base_python"], "-m", "venv", str(venv)])
                 if r.returncode or not py.exists():
-                    print("\n  [X]  could not create the Python environment (.venv)", flush=True)
+                    print(f"\n  [X]  could not create the Python environment ({VENV})", flush=True)
                     print("       Linux: install python3-venv (sudo apt install python3-venv) or run ./setup.sh "
                           "once in a terminal", flush=True)
                     record(exit_code=1, ended=time.strftime("%Y-%m-%d %H:%M:%S"))
