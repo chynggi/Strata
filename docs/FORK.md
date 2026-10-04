@@ -59,7 +59,15 @@ Then, if there are conflicts:
   They are functions so they follow `ROOT`: the tests point `ROOT` at a temporary folder, and a constant
   kept the real `engine/`, which the tests' fake engines overwrote.
 - **`setup.py` / model choice**: upstream picks sizes from `MODELS`; the fork uses `fam.get("sizes") or
-  {... MODELS ...}` and passes `--compat-bf16` for families that set `compat_bf16`.
+  {... MODELS ...}` and passes `--compat-bf16` for families that set `compat_bf16`. `names = list(sizes)`; the
+  "no such size" check is upstream's #444 message (`has no {model} model file`), with `MODELS.get(model, {})`
+  for its "or <family>" hint so a fork-family size (`IQ2_M`, `IQ3_XS`) cannot raise `KeyError`. The budget
+  branch is upstream's `budget, q4_split = None, False`, guarded by the fork's `sizes[model].get("budget")`.
+- **`setup.py` / config list**: `run_configs` is the fork's (a folder's `strata-*.json` minus the
+  `*.shared-settings.json` chat settings the server keeps); upstream's `write_config` / `readable_config` (#459)
+  and `model_config` (#549) stay beside it. `installed_configs` is the fork's per-OS dual-boot filter over
+  upstream's `model_config` (`[p for p in run_configs(ROOT) if model_config(p)]`, then the `strata-linux-`
+  test), and the fork's `config_label` is kept.
 - **`setup.py` / config names**: `strata-{CFG_PREFIX}{tag}-vision|novision` for the config and log,
   `run-{tag}-vision|novision` for the start script (one of each per images setting).
 - **`setup.py` / `MODELS[model]` in `main()`**: upstream's new code reads `MODELS[model]`; in `main()` it is the
@@ -81,3 +89,19 @@ Then, if there are conflicts:
   `FALLBACK_FAMILIES` lists the fork's families.
 - **`docs/DETAILS.md`, `README.md`**: upstream's `Strata-data` text stays; the fork's dual-boot section and
   uncensored table stay.
+
+## Merge log
+
+Where each upstream `main` was folded into the fork (the fork's own merges in `git log --merges main`):
+
+| Upstream | Fork merge commit | What it brought / the `setup.py` conflicts resolved |
+| --- | --- | --- |
+| engine 0.1.3-0.1.6 | `e7db7b1` | IQ3_S, KV streaming, conversation cache |
+| v0.1.22 | `c2f423b` | |
+| v0.1.30 | `469ee40` | |
+| v0.1.34 | `f68c1c6` | `tools/iq_pack.py` (FORM conversions, `native_experts.txt` v4) and `setup.py` (budget mode, `gguf_dir_shards`, the engine/build dir functions) |
+| v0.1.38 | `69aa0e4` | engine 0.1.35-0.1.38; `setup.py` only (the config helpers, the #444 model check, `budget, q4_split`), see the bullets above |
+
+`git rerere` replayed the recorded `ROOT / "engine"` -> `engine_dir()` and `ROOT / "build"` -> `build_dir()`
+renames onto upstream's new code in the v0.1.38 merge, so those hunks merged without a conflict. The Python
+tests pass with the fork's `.venv` (294 tests).
