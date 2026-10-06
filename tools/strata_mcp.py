@@ -66,7 +66,11 @@ FALLBACK_MODELS = {
               "ram_gb": 32, "arena_gb": 23.4, "families": ("coder",)},
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), EXPERIMENTAL: the best quality, but most experts come from the "
                             "SSD on a 64 GB PC (7-8.5 tokens/s measured)", "download_gb": 111.3, "ram_gb": 48,
-                   "arena_gb": 77.0, "families": ("unsloth",), "budget": True},
+                   "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "experimental": True},
+    "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), between IQ3_S and UD-Q4_K_XL in quality; on a PC with "
+                           "less than ~80 GB of RAM part of its experts are read from the SSD",
+                  "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
+                  "vision": True},
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -81,11 +85,12 @@ FALLBACK_FAMILIES = {
             "about": "refusals removed, a different method; not gated; needs ~70 GB of RAM", "tag": "rvn-"},
     "coder": {"title": "Qwen3.8-Flash-Next Coder", "about": "half the experts (code, tools, images kept): needs ~32 GB "
                                                             "of RAM, faster; weaker outside coding", "tag": "coder-"},
-    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "4-bit, 111 GB download, most experts read from the "
-                                                                  "SSD: slow (7-8.5 tokens/s on a 64 GB PC)",
-                "tag": "unsloth-", "experimental": True, "vision": False},
+    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "UD-IQ4_XS: a 94 GB download; with less than ~80 GB "
+                                                                  "of RAM part of its experts are read from the SSD "
+                                                                  "(UD-Q4_K_XL, 111 GB: experimental)",
+                "tag": "unsloth-", "vision": False},
 }
-FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 262144, 393216, 524288]
+FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
                 "Plain prose, no title.")
 
@@ -439,7 +444,9 @@ class Strata:
                                     if family in d.get("families", ("qwen", "swift"))}
 
     def sizes_of(self, models, family) -> list:
-        return list(self.size_table(models, family))
+        """The family's sizes as setup lists them: an experimental one last (never the default)."""
+        sizes = self.size_table(models, family)
+        return sorted(sizes, key=lambda m: bool(sizes[m].get("experimental")))
 
     # ---- paths
     def settings_path(self) -> Path:
@@ -492,6 +499,7 @@ class Strata:
     def configs(self) -> list[Path]:
         """This OS's run configs, the most recently used first - not the other OS's (dual boot) and not the chat
         settings the server keeps beside each one (strata-<tag>.shared-settings.json)."""
+        # #346: the chat settings file the server keeps beside each one is no config
         mine = [p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")
                 and p.name.startswith("strata-linux-") == (not WIN)]
         return sorted(mine, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -711,8 +719,9 @@ class Strata:
         ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
         if vram < 11:
             notes.append("less than 12 GB of VRAM: it runs, but slowly (most experts stay on the CPU)")
-        if hw.get("cpu", {}).get("avx2") is False:
-            return {"family": None, "model": None, "why": "this CPU has no AVX2; Strata needs at least AVX2"}
+        if hw.get("cpu", {}).get("avx2") is False:      # #623: a warning, not a stop (setup compiles for it)
+            notes.append("this CPU has no AVX2: EXPERIMENTAL and slow - setup compiles the engine on this PC for the "
+                         "older CPU (10-20 minutes), and the CPU's share of the experts runs a few times slower")
         if backend == "hip":
             notes.append("AMD (experimental, Linux): the engine is compiled during setup; no images")
         cmd = (("START-HERE.bat --setup" if WIN else "./setup.sh --setup") +
@@ -740,17 +749,21 @@ class Strata:
                     verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
                     try:
                         if d.get("budget"):
-                            verdict = ("experimental: part of its experts in RAM, the rest read from the SSD"
+                            verdict = (("experimental: " if d.get("experimental") else "")
+                                       + "part of its experts in RAM, the rest read from the SSD"
                                        if ram >= d["ram_gb"] else "does not fit")
                         elif S and "sizes" not in fd and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
                             verdict = "fits in the low-RAM mode (slower: the GPU holds part of the experts)"
                     except Exception:                   # noqa: BLE001
                         pass
                 sizes.append({"model": m, "about": d["about"], "download_gb": d["download_gb"],
+                              "experimental": bool(d.get("experimental")),
+                              "images": d.get("vision", fd.get("vision", True)) is not False,
                               "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"),
                               "on_this_pc": verdict, "installed": tag in have, "id": tag})
             out.append({"family": f, "title": fd["title"], "about": fd.get("about"),
-                        "experimental": bool(fd.get("experimental")), "images": fd.get("vision", True) is not False,
+                        "experimental": bool(fd.get("experimental")),
+                        "images": any(x["images"] for x in sizes) if sizes else fd.get("vision", True) is not False,
                         "sizes": sizes})
         return out
 
@@ -966,7 +979,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
          "annotations": ro},
         {"name": "strata_models", "title": "Strata models",
          "description": "The models and sizes Strata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
-                        "Swift 1.5, coder = the Coder, unsloth = experimental 4-bit), with download size, RAM needed, "
+                        "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit), with download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
                         "Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
@@ -983,7 +996,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
              "family": {"type": "string", "enum": list(families),
                         "description": "qwen = Qwen3.8-Flash-Next (the original), swift = Swift 1.5 (thinks "
                                        "shorter), coder = the Coder (half the experts, ~32 GB RAM, for code), "
-                                       "unsloth = 4-bit EXPERIMENTAL (slow)"},
+                                       "unsloth = Unsloth's ~4-bit (UD-IQ4_XS; UD-Q4_K_XL is "
+                                       "experimental), part of the experts read from the SSD"},
              "model": {"type": "string", "enum": list(models),
                        "description": "the size (quantization): see strata_models"},
              "context": {"type": "integer", "enum": contexts,
@@ -1256,8 +1270,8 @@ class Tools:
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
             if sz.get("budget"):
                 context = 8192 if vram < 14 else 32768
-        if vision in ("yes", "gpu", "cpu") and families[family].get("vision") is False:
-            raise ToolError(f"images are not available with {families[family]['title']} yet: use vision=no")
+        if vision in ("yes", "gpu", "cpu") and sz.get("vision", families[family].get("vision")) is False:
+            raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is not None and backend == "hip" and vision != "no":
             raise ToolError("images are not available on the AMD backend yet: use vision=no")
         target = self.check_data_dir(data_dir) if data_dir else s.data_dir()
@@ -1298,7 +1312,7 @@ class Tools:
                             "the options (finished steps are skipped)")
         if families[family].get("license"):
             plan["license"] = families[family]["license"]
-        if families[family].get("experimental"):
+        if families[family].get("experimental") or sz.get("experimental"):
             plan["experimental"] = True
         if families[family].get("gated"):              # setup runs with --yes: it cannot ask for the token
             plan["gated"] = ("needs a Hugging Face token whose account accepted the terms at "
