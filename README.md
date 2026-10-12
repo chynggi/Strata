@@ -115,6 +115,8 @@ CMake build cache (`build*/` vs `build-linux*/`) and the Python environment (`.v
 downloaded model, its prepared packs and the MTP draft layer are **shared**, so nothing is downloaded, prepared or
 compiled twice. Just run `START-HERE.bat` on Windows and `./setup.sh` on Linux; neither touches the other's files.
 
+**Is it fast on your PC?** Run `BENCH.bat` (`./bench.sh`): about 5-10 minutes, it measures chat, 4K/16K prompts and an agent-style session with your own settings and writes a report to share ([how](docs/COMMUNITY_BENCHMARKS.md#run-the-benchmark)).
+
 ## Which model should I pick?
 
 The installer recommends one for your RAM. The same model comes in several sizes, compressed more or less. Smaller

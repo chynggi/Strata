@@ -4,6 +4,7 @@
 # Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
 # The Linux environment is .venv-linux, not .venv, so a dual-boot PC can share this folder with Windows
 # (which keeps its own .venv) without either side overwriting the other.
+# NixOS (or STRATA_UV=1) with uv installed: uv makes the project venv; every other Linux uses the standard venv.
 cd "$(dirname "$0")" || exit 1
 # Python 3.10+ that can make a venv WITH pip: Debian/Ubuntu ship `venv` without `ensurepip` (that is the separate
 # python3-venv package), and a venv made without it has no pip
@@ -13,12 +14,23 @@ if [ -x .venv-linux/bin/python ] && ! .venv-linux/bin/python -m pip --version >/
   rm -rf .venv-linux
 fi
 if [ ! -x .venv-linux/bin/python ]; then
+  # uv's own Python only on NixOS (its Python cannot load pip wheels' libraries), or when asked: STRATA_UV=1.
+  # Everywhere else the standard venv stays the default (#662: a silent toolchain change was not wanted).
+  UV=""
+  if [ "${STRATA_UV:-}" = "1" ] || grep -qi '^ID=nixos' /etc/os-release 2>/dev/null; then
+    UV="$(command -v uv 2>/dev/null || true)"
+  fi
   PY=""
-  for c in python3 python; do
-    if command -v $c >/dev/null 2>&1 && ok_py $c; then
-      PY=$c; break
-    fi
-  done
+  if [ -n "$UV" ]; then
+    # Prefer uv's own interpreter: unlike Nix's Python, it works naturally with pip wheels using dlopen.
+    PY=3.12
+  else
+    for c in python3 python; do
+      if command -v $c >/dev/null 2>&1 && ok_py $c; then
+        PY=$c; break
+      fi
+    done
+  fi
   if [ -z "$PY" ]; then
     echo "Python 3.10+ with venv is needed; installing it (sudo will ask for your password) ..."
     if command -v apt-get >/dev/null 2>&1; then
@@ -31,11 +43,16 @@ if [ ! -x .venv-linux/bin/python ]; then
     PY=python3
     if ! ok_py $PY; then
       echo "Please install Python 3.10 or newer with venv (Ubuntu/Debian: sudo apt install python3-venv), then run"
-      echo "./setup.sh again."
+      echo "./setup.sh again. On NixOS, add uv to environment.systemPackages."
       exit 1
     fi
   fi
-  # a private environment inside this folder (system Python stays untouched; newer distros refuse global pip)
-  $PY -m venv .venv-linux || { rm -rf .venv-linux; echo "could not create .venv-linux: sudo apt install python3-venv"; exit 1; }
+  if [ -n "$UV" ]; then
+    # Force an uv-managed interpreter: pip wheels may dlopen libraries outside the Nix store.
+    "$UV" venv --managed-python --seed --python "$PY" .venv-linux || { echo "Could not create the uv environment in .venv-linux."; exit 1; }
+  else
+    # a private environment inside this folder (system Python stays untouched; newer distros refuse global pip)
+    $PY -m venv .venv-linux || { rm -rf .venv-linux; echo "could not create .venv-linux: sudo apt install python3-venv"; exit 1; }
+  fi
 fi
 exec .venv-linux/bin/python setup.py "$@"
