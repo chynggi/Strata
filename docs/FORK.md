@@ -13,6 +13,7 @@ resolve conflicts the same way every time, and so nothing upstream adds is dropp
 | Dual-boot layout | `setup.py` (`engine_dir(toolkit)`, `build_dir(toolkit)`, `vision_build_dir(toolkit)`, `CFG_PREFIX`), `setup.sh`, `docker-entrypoint.sh`, `.gitignore` | Windows and Linux share one folder: each OS keeps its own engine (`engine/` vs `engine-linux/`, and upstream's `engine-cuda12/` vs `engine-cuda12-linux/`), CMake cache (`build*/` vs `build-linux*/`), Python env (`.venv` vs `.venv-linux/`), run config and log (`strata-*.json` vs `strata-linux-*.json`). Model data stays shared. |
 | MCP server | `tools/strata_mcp.py`, `tools/test_fork_mcp.py` | The dual-boot layout (`VENV`, `ENGINE`, `CFG_PREFIX`): this OS's run configs only (not `*.shared-settings.json`), model ids `<tag>-vision|novision` with their `run-<id>` scripts (`<tag>` alone finds the latest), and the uncensored families' own `sizes` (`size_table`; also where upstream's `install_plan` reads `vision`/`experimental`, which it writes as `models[model]`); a gated family's install plan says it needs `HF_TOKEN`. |
 | Line endings | `.gitattributes`, `.gitignore` | `* text=auto eol=lf` so a Windows editor cannot turn the tree into CRLF (an earlier commit did, and every later merge conflicted on every line). |
+| Windows locale | `tools/strata_bench.py` | `project_version()` reads the BOM'd `CMakeLists.txt` as UTF-8 (`encoding="utf-8-sig"`, as `setup.py`'s `source_version()` already does). Upstream reads it through the locale encoding, which is cp949 on a Korean Windows, so `BENCH.bat` stopped with `UnicodeDecodeError` before measuring anything (new in 0.1.43). Report it upstream and drop the change when it lands there. |
 
 Fork-only files (upstream has none of these, so they never conflict): `docs/FORK.md`,
 `scripts/merge-upstream.sh`, `scripts/merge-upstream.ps1`, `tools/test_fork_mcp.py`,
@@ -122,10 +123,8 @@ Where each upstream `main` was folded into the fork (the fork's own merges in `g
 `git rerere` replayed the recorded `ROOT / "engine"` -> `engine_dir()` and `ROOT / "build"` -> `build_dir()`
 renames onto upstream's new code in the v0.1.38 merge, so those hunks merged without a conflict. The Python
 tests run with the fork's `.venv` (470 before the v0.1.43 merge; 467 since v0.1.40.1; 294 before it): 685 now,
-673 pass and 10 skip, and 2 error in upstream's new `tools/test_strata_bench.py`, whose `project_version()`
-reads the BOM'd `CMakeLists.txt` through the locale encoding - cp949 on this PC, so it raises
-`UnicodeDecodeError` (`PYTHONUTF8=1` passes). Nothing in the merge touches that file; upstream's fix is
-`encoding="utf-8-sig"`, as `setup.py`'s own `source_version()` already reads it.
+673 pass, 10 skip, 0 errors (the two errors of the merge itself were upstream's new `tools/strata_bench.py`
+on this PC's cp949 locale - the one-line fix is the Windows-locale row above).
 
 ### The v0.1.40.1 merge: upstream rewrote its history
 
