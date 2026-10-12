@@ -10,13 +10,13 @@ resolve conflicts the same way every time, and so nothing upstream adds is dropp
 | --- | --- | --- |
 | Uncensored models | `setup.py` (`FAMILIES`: `orca`, `mrad`, `rvn`), `tools/iq_pack.py` | One-click install of community "abliterated" GGUFs. `orca` is gated (a Hugging Face token is asked for); each family carries its own `sizes` dict. |
 | Community-GGUF packing | `tools/iq_pack.py` | `--compat-bf16` (the families' `compat_bf16`) makes a quantized PLE key BF16 in the pack, which the engine keeps (#326; verified on OrcaRouter IQ2_M, whose IQ2_S key once needed the shard rewritten by the removed `tools/ple_key_bf16.py`); quantized tensors the engine cannot serve natively (e.g. Q2_K) are dequantized to BF16 (`served_natively` / `dequant_bf16`). Layers split across shards and atomic pack writes are upstream's since 0.1.34 (`native_experts.txt` v4). |
-| Dual-boot layout | `setup.py` (`engine_dir(toolkit)`, `build_dir(toolkit)`, `vision_build_dir(toolkit)`, `CFG_PREFIX`), `setup.sh`, `.gitignore` | Windows and Linux share one folder: each OS keeps its own engine (`engine/` vs `engine-linux/`, and upstream's `engine-cuda12/` vs `engine-cuda12-linux/`), CMake cache (`build*/` vs `build-linux*/`), Python env (`.venv` vs `.venv-linux/`), run config and log (`strata-*.json` vs `strata-linux-*.json`). Model data stays shared. |
+| Dual-boot layout | `setup.py` (`engine_dir(toolkit)`, `build_dir(toolkit)`, `vision_build_dir(toolkit)`, `CFG_PREFIX`), `setup.sh`, `docker-entrypoint.sh`, `.gitignore` | Windows and Linux share one folder: each OS keeps its own engine (`engine/` vs `engine-linux/`, and upstream's `engine-cuda12/` vs `engine-cuda12-linux/`), CMake cache (`build*/` vs `build-linux*/`), Python env (`.venv` vs `.venv-linux/`), run config and log (`strata-*.json` vs `strata-linux-*.json`). Model data stays shared. |
 | MCP server | `tools/strata_mcp.py`, `tools/test_fork_mcp.py` | The dual-boot layout (`VENV`, `ENGINE`, `CFG_PREFIX`): this OS's run configs only (not `*.shared-settings.json`), model ids `<tag>-vision|novision` with their `run-<id>` scripts (`<tag>` alone finds the latest), and the uncensored families' own `sizes` (`size_table`; also where upstream's `install_plan` reads `vision`/`experimental`, which it writes as `models[model]`); a gated family's install plan says it needs `HF_TOKEN`. |
 | Line endings | `.gitattributes`, `.gitignore` | `* text=auto eol=lf` so a Windows editor cannot turn the tree into CRLF (an earlier commit did, and every later merge conflicted on every line). |
 
 Fork-only files (upstream has none of these, so they never conflict): `docs/FORK.md`,
 `scripts/merge-upstream.sh`, `scripts/merge-upstream.ps1`, `tools/test_fork_mcp.py`,
-`MoreSimpleStart.*`.
+`tools/test_fork_setup.py`, `MoreSimpleStart.*`.
 
 ## Keeping merges small
 
@@ -76,14 +76,22 @@ Then, if there are conflicts:
 - **`setup.py` / `MODELS[model]` in `main()`**: upstream's new code reads `MODELS[model]`; in `main()` it is the
   fork's `sizes[model]` (helpers that read it take a `sizes=MODELS` argument: `confirm_paging`, `ctx_ram_need`,
   `ram_ctx`) (the fork's families have sizes MODELS does not, e.g. `IQ2_M`). The low-RAM helpers
-  (`low_ram_*`) stay on `MODELS`, and the low-RAM mode is off for families that carry their own `sizes`.
+  (`low_ram_*`) stay on `MODELS`, and the low-RAM mode is off for families that carry their own `sizes`. The
+  v0.1.43 merge's new one was the #967 images warning (`sizes[model].get("vision_untested")`); the ones inside
+  `if sizes[model].get("budget")` and `if low_ram` cannot be reached by a fork family and stay on `MODELS`.
 - **`setup.py` / HIP engine**: upstream's `build_engine_hip`, `get_prebuilt_hip` and `ensure_engine_for` write
   `ROOT / "engine"`; that is `engine_dir()` (`engine/` on Windows, `engine-linux/` on Linux; the HIP engine is
   never the CUDA 12 one, so it stays on the default toolkit 13).
 - **`setup.py` / `download`**: the fork's `token=` is passed only for a gated model, so upstream's tests' fake
   `download(url, dst, what=None)` keeps working. `write_run_script` keeps upstream's three arguments (the
   vision suffix comes from the config's name).
-- **`setup.sh`**: the environment is `.venv-linux`, not `.venv`.
+- **`setup.sh`**: the environment is `.venv-linux`, not `.venv` (upstream's NixOS/`STRATA_UV` branch, `UV` and
+  `--managed-python`, creates that same `.venv-linux`).
+- **`docker-entrypoint.sh`**: the config is the name `setup.py` writes on Linux
+  (`strata-linux-<tag>-vision|novision.json`), so the link in `/opt/strata` is `link="/opt/strata/$name"`, not
+  upstream's `strata-$tag.json`: the fork's `installed_configs` accepts only `strata-linux-*` on Linux, so
+  upstream's name would be ignored and the container would set the model up again at every start. Keep
+  upstream's `ln -sfn`, its #1244 comment and its `Config: ...` lines.
 - **`tools/iq_pack.py`**: take upstream's file (FORM conversions, `native_experts.txt` v4, the experts.bin
   sidecar), then keep the fork's `served_natively` / `dequant_bf16` and the
   BF16 fallback in `index_standalone`'s loop for a quantized tensor with no FORM entry that the engine cannot
@@ -109,10 +117,15 @@ Where each upstream `main` was folded into the fork (the fork's own merges in `g
 | v0.1.34 | `f68c1c6` | `tools/iq_pack.py` (FORM conversions, `native_experts.txt` v4) and `setup.py` (budget mode, `gguf_dir_shards`, the engine/build dir functions) |
 | v0.1.38 | `69aa0e4` | engine 0.1.35-0.1.38; `setup.py` only (the config helpers, the #444 model check, `budget, q4_split`), see the bullets above |
 | v0.1.40.1 | `9558fea` | engine 0.1.39-0.1.40.1: the experimental CUDA 12 engine, `model_file`/`model_shards` (#621), `model_config_files` (#346), the `low_ram_wanted` / KV-streaming refactors (#608 #642), the engine rollback (#670), `SECURITY.md`, seven translated READMEs. Upstream had force-pushed a rewritten history, so the base was re-anchored first - see below. `setup.py`: one `engine_dir(toolkit)`/`build_dir(toolkit)`/`vision_build_dir(toolkit)` for both the CUDA 12 engine and the dual-boot folders, `sizes[model]` for upstream's new `MODELS[model]` in `main()`, `model_config_files` for the dropped `run_configs`, the fork's config names for upstream's new `old_cfg`; `tools/strata_mcp.py`'s `install_plan` reads the family's size dict |
+| v0.1.43 | `5f0852c7` | engine 0.1.41-0.1.43: the HIP layer split, the route-resident swap, the canonical Q2_0 pack, the #1892 NaN guard, the #1244 Docker config link, 2307 files. `setup.py` (2 conflicts): upstream's four-part hotfix version (`[:4]`) with the fork's `sizes[model]` for `need_engine`, and `sizes[model]` for the new #967 `vision_untested` read in `main()` (no conflict, but `MODELS[model]` there would raise `KeyError` for a fork family); `setup.sh`: the fork's `.venv-linux` with upstream's uv/NixOS branch in one place; `docker-entrypoint.sh`: the fork's config name for the `/opt/strata` link (`link="/opt/strata/$name"`) with upstream's `ln -sfn` and `Config: ...` lines; `README.md` and `docs/DETAILS.md`: both sides kept (the dual-boot text and the uncensored table, upstream's `BENCH.bat` line and its several-keys text). The other files the fork touches merged cleanly and were checked one by one |
 
 `git rerere` replayed the recorded `ROOT / "engine"` -> `engine_dir()` and `ROOT / "build"` -> `build_dir()`
 renames onto upstream's new code in the v0.1.38 merge, so those hunks merged without a conflict. The Python
-tests pass with the fork's `.venv` (467 tests since v0.1.40.1; 294 before it).
+tests run with the fork's `.venv` (470 before the v0.1.43 merge; 467 since v0.1.40.1; 294 before it): 685 now,
+673 pass and 10 skip, and 2 error in upstream's new `tools/test_strata_bench.py`, whose `project_version()`
+reads the BOM'd `CMakeLists.txt` through the locale encoding - cp949 on this PC, so it raises
+`UnicodeDecodeError` (`PYTHONUTF8=1` passes). Nothing in the merge touches that file; upstream's fix is
+`encoding="utf-8-sig"`, as `setup.py`'s own `source_version()` already reads it.
 
 ### The v0.1.40.1 merge: upstream rewrote its history
 
