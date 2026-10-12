@@ -1000,8 +1000,9 @@ def split_mmap(cfg: dict) -> bool:
 
 
 def model_file(fam: dict, model: str, i: int) -> str:
-    """Shard i's file name: the family's pattern, or the model's own (#621: UD-IQ4_XS has three shards, not four)."""
-    return MODELS.get(model, {}).get("file", fam["file"]).format(q=model, i=i)
+    """Shard i's file name: the family's pattern, or the model's own (#621: UD-IQ4_XS has three shards, not four).
+    The fork's uncensored families name the shard count too ({n:05d}: ...-00001-of-00008.gguf), so `n` is passed."""
+    return MODELS.get(model, {}).get("file", fam["file"]).format(q=model, i=i, n=model_shards(fam, model))
 
 
 def model_shards(fam: dict, model: str) -> int:
