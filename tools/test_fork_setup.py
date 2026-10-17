@@ -34,6 +34,8 @@ class UncensoredShardNames(unittest.TestCase):
     def test_every_choice_formats_its_shard_names(self):
         """Each family's pattern makes `model_shards` distinct names whose own i-of-N suffix matches them."""
         for f, fam in setup.FAMILIES.items():
+            if "file" not in fam:                              # upstream's ready-made packs (nvfp4) list their files
+                continue
             sizes = fam.get("sizes") or {m: d for m, d in setup.MODELS.items()
                                          if f in d.get("families", ("qwen", "swift"))}
             for model in sizes:
