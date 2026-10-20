@@ -215,9 +215,81 @@
   ],
   "repo": "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF"
  },
+ "orca/IQ2_M": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 80075269120,
+  "expert_bytes": {
+   "IQ2_S": 25794969600,
+   "IQ4_NL": 22649241600
+  },
+  "experts_bpw": 3.208,
+  "bpw": 3.62,
+  "files": [
+   "Qwen3.8-Flash-Next-Uncensored-IQ2_M-00001-of-00002.gguf",
+   "Qwen3.8-Flash-Next-Uncensored-IQ2_M-00002-of-00002.gguf"
+  ],
+  "repo": "orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF"
+ },
+ "orca/IQ3_XXS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 85191644160,
+  "expert_bytes": {
+   "IQ3_XXS": 30828134400,
+   "IQ4_NL": 22649241600
+  },
+  "experts_bpw": 3.542,
+  "bpw": 3.852,
+  "files": [
+   "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS-00001-of-00002.gguf",
+   "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS-00002-of-00002.gguf"
+  ],
+  "repo": "orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF"
+ },
+ "mrad/IQ3_S": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 88871741440,
+  "expert_bytes": {
+   "IQ3_S": 34603008000,
+   "IQ4_NL": 22649241600
+  },
+  "experts_bpw": 3.792,
+  "bpw": 4.018,
+  "files": [
+   "Qwen3.8-Flash-Next-Uncensored.i1-IQ3_S.gguf"
+  ],
+  "repo": "mradermacher/Qwen3.8-Flash-Next-Uncensored-i1-GGUF"
+ },
+ "rvn/IQ3_XS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 86016624640,
+  "expert_bytes": {
+   "IQ3_S": 8650752000,
+   "IQ3_XXS": 23121100800,
+   "IQ4_NL": 22649241600
+  },
+  "experts_bpw": 3.604,
+  "bpw": 3.889,
+  "files": [
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00001-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00002-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00003-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00004-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00005-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00006-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00007-of-00008.gguf",
+   "RVN-Qwen3.8-Flash-Next-IQ3_XS-00008-of-00008.gguf"
+  ],
+  "repo": "0bserverx/RVN-Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF"
+ },
  "_roles": {
   "blk.N.attn_gate.weight": [
+   "IQ2_S",
    "IQ3_S",
+   "IQ3_XXS",
    "IQ4_XS",
    "Q2_0",
    "Q3_K",
@@ -227,7 +299,9 @@
    "Q8_0"
   ],
   "blk.N.attn_k.weight": [
+   "IQ2_S",
    "IQ3_S",
+   "IQ3_XXS",
    "IQ4_XS",
    "Q3_K",
    "Q4_K",
@@ -247,7 +321,9 @@
    "Q8_0"
   ],
   "blk.N.attn_q.weight": [
+   "IQ2_S",
    "IQ3_S",
+   "IQ3_XXS",
    "IQ4_XS",
    "Q2_0",
    "Q3_K",
@@ -315,7 +391,9 @@
    "F32"
   ],
   "blk.N.ffn_gate_shexp.weight": [
+   "IQ2_S",
    "IQ3_S",
+   "IQ3_XXS",
    "IQ4_XS",
    "Q2_0",
    "Q3_K",
@@ -339,7 +417,9 @@
    "TQK6"
   ],
   "blk.N.ffn_up_shexp.weight": [
+   "IQ2_S",
    "IQ3_S",
+   "IQ3_XXS",
    "IQ4_XS",
    "Q2_0",
    "Q3_K",
@@ -350,12 +430,14 @@
   ],
   "blk.N.hc_attn_down.weight": [
    "BF16",
+   "IQ3_S",
    "Q6_K",
    "Q8_0"
   ],
   "blk.N.hc_attn_inject.weight": [
    "BF16",
    "F32",
+   "IQ3_S",
    "Q6_K"
   ],
   "blk.N.hc_attn_norm.weight": [
@@ -363,16 +445,19 @@
   ],
   "blk.N.hc_attn_up.weight": [
    "BF16",
+   "IQ4_NL",
    "Q8_0"
   ],
   "blk.N.hc_ffn_down.weight": [
    "BF16",
+   "IQ3_S",
    "Q6_K",
    "Q8_0"
   ],
   "blk.N.hc_ffn_inject.weight": [
    "BF16",
    "F32",
+   "IQ3_S",
    "Q6_K"
   ],
   "blk.N.hc_ffn_norm.weight": [
@@ -380,19 +465,22 @@
   ],
   "blk.N.hc_ffn_up.weight": [
    "BF16",
+   "IQ4_NL",
    "Q8_0"
   ],
   "blk.N.indexer.k_norm.weight": [
    "F32"
   ],
   "blk.N.indexer.k_proj.weight": [
-   "BF16"
+   "BF16",
+   "F16"
   ],
   "blk.N.indexer.q_norm.weight": [
    "F32"
   ],
   "blk.N.indexer.q_proj.weight": [
-   "BF16"
+   "BF16",
+   "F16"
   ],
   "blk.N.ple_conv1d.weight": [
    "F16",
@@ -400,6 +488,9 @@
   ],
   "blk.N.ple_key.weight": [
    "BF16",
+   "IQ2_S",
+   "IQ3_S",
+   "IQ3_XXS",
    "Q2_0",
    "Q6_K",
    "Q8_0"
@@ -415,6 +506,9 @@
   ],
   "blk.N.ple_value.weight": [
    "BF16",
+   "IQ2_S",
+   "IQ3_S",
+   "IQ3_XXS",
    "Q6_K",
    "Q8_0"
   ],
@@ -424,11 +518,17 @@
   "blk.N.ssm_alpha.weight": [
    "BF16",
    "F32",
+   "IQ2_S",
+   "IQ3_S",
+   "IQ3_XXS",
    "Q5_K"
   ],
   "blk.N.ssm_beta.weight": [
    "BF16",
    "F32",
+   "IQ2_S",
+   "IQ3_S",
+   "IQ3_XXS",
    "Q5_K"
   ],
   "blk.N.ssm_conv1d.weight": [
@@ -441,7 +541,9 @@
    "F32"
   ],
   "blk.N.ssm_out.weight": [
+   "IQ2_S",
    "IQ3_S",
+   "IQ3_XXS",
    "IQ4_XS",
    "Q3_K",
    "Q4_K",
@@ -457,7 +559,9 @@
   ],
   "output_hc_down.weight": [
    "BF16",
+   "IQ3_S",
    "IQ4_NL",
+   "Q6_K",
    "Q8_0"
   ],
   "output_hc_norm.weight": [

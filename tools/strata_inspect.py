@@ -44,6 +44,13 @@ KNOWN = [
     ("unsloth", "UD-IQ4_XS", "unsloth/Qwen3.8-Flash-Next-GGUF", "UD-IQ4_XS/"),
     ("unsloth", "UD-Q4_K_XL", "unsloth/Qwen3.8-Flash-Next-GGUF", "UD-Q4_K_XL/"),
 ]
+# the fork's uncensored families (docs/FORK.md): on Hugging Face only, read there (orca is gated: HF_TOKEN)
+FORK_KNOWN = [
+    ("orca", "IQ2_M", "orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF", "Qwen3.8-Flash-Next-Uncensored-IQ2_M-"),
+    ("orca", "IQ3_XXS", "orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF", "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS-"),
+    ("mrad", "IQ3_S", "mradermacher/Qwen3.8-Flash-Next-Uncensored-i1-GGUF", "Qwen3.8-Flash-Next-Uncensored.i1-IQ3_S."),
+    ("rvn", "IQ3_XS", "0bserverx/RVN-Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF", "RVN-Qwen3.8-Flash-Next-IQ3_XS-"),
+]
 
 
 def read_headers(files: list) -> tuple[str | None, list[dict]]:
@@ -128,9 +135,9 @@ def verdict(fp: dict, table: dict) -> tuple[str, str]:
 
 def make_fingerprints(out: Path) -> None:
     listing, table = {}, {}
-    for fam, model, repo, prefix in KNOWN:
+    for fam, model, repo, prefix, hub in [(*k, "ms") for k in KNOWN] + [(*k, "hf") for k in FORK_KNOWN]:
         if repo not in listing:
-            listing[repo] = qs.list_hub("ms", repo)
+            listing[repo] = qs.list_hub(hub, repo)
         files = sorted((f for f in listing[repo] if f.name.startswith(prefix) and f.name.endswith(".gguf")),
                        key=lambda f: f.name)
         table[f"{fam}/{model}"] = {**fingerprint(*read_headers(files)), "files": [f.name for f in files], "repo": repo}

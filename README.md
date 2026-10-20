@@ -199,6 +199,7 @@ More choices:
   downloaded).
   Measured: OrcaRouter IQ2_M on an RTX 3060 (12 GB), a Core i5-10400 (AVX2) and 64 GB of RAM writes ~21 tokens/s.
   Without questions: `START-HERE.bat --family orca --model IQ2_M` (or `--family mrad` / `--family rvn`).
+  In the desktop app built from this fork they are under **Uncensored models** on the Models page (the token as above).
 
 Every size, download and what fits where: [docs/MODELS.md](docs/MODELS.md).
 

@@ -236,8 +236,18 @@ START-HERE.bat --setup --family nvfp4 --model NVFP4-QAD
 
 ### OrcaRouter Uncensored IQ3_XXS
 
-For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](ORCA.md). It needs an
-explicit packing conversion and is not an installer menu option.
+In this fork, **OrcaRouter's Flash-Next Uncensored** is an installer and app choice (family `orca`, sizes IQ2_M and
+IQ3_XXS), next to mradermacher's IQ3_S of the same weights (`mrad`) and RVN's IQ3_XS (`rvn`). Setup does the
+compatibility conversion of the [manual setup](ORCA.md) itself (`tools/iq_pack.py --compat-bf16`), and the app lists them
+under "Uncensored models". OrcaRouter is gated: accept its terms on Hugging Face and set `HF_TOKEN` or run
+`hf auth login` first (setup also asks for the token when it runs in a window).
+
+```
+START-HERE.bat --setup --family orca --model IQ3_XXS
+```
+
+The sizes, downloads and RAM: the README's uncensored table. Measured: OrcaRouter IQ2_M on an RTX 3060 (12 GB), a Core
+i5-10400 and 64 GB of RAM writes ~21 tokens/s.
 
 ## Qwen3.6-35B-A3B
 

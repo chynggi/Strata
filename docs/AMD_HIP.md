@@ -279,7 +279,8 @@ once per process, so the two are separate runs. It times one layer's recurrence 
 ## Model and serving configuration
 
 Prepare a supported model pack and its MTP runtime using the existing tools.
-For OrcaRouter IQ3_XXS, follow [the explicit compatibility conversion](ORCA.md);
+For OrcaRouter IQ3_XXS, follow [the explicit compatibility conversion](ORCA.md) (in this fork, setup's
+`--family orca --model IQ3_XXS` does it);
 this backend does not change quantization, model licenses, or tokenizers.
 Add `--experts-bin` to the `tools/iq_pack.py` command: mmap requires the pack's
 `experts.bin`, which the default native packing command does not emit. This

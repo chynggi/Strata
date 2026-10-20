@@ -50,6 +50,7 @@ export const VERSION_GROUPS: { id: string; title: string; families: string[] }[]
   { id: 'nvfp4', title: 'NVFP4 models', families: ['nvfp4'] },
   { id: 'gyro', title: 'Gyro models', families: ['gyro'] },
   { id: 'unsloth', title: 'Unsloth models', families: ['unsloth'] },
+  { id: 'uncensored', title: 'Uncensored models', families: ['orca', 'mrad', 'rvn'] },   // the fork's families (docs/FORK.md)
 ];
 
 /** The fixed "Recommended" picks, in order: engine family + model name + the short note shown beside the name. */

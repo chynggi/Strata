@@ -7,14 +7,17 @@ export function nativeVersionLabel(model:string){const nv=nvfp4Version(model);if
 export const catalogVersionLabel=(version:CatalogVersion)=>{const label=nativeVersionLabel(version.model);return [tr(version.edition),label===version.model&&version.edition?'':label].filter(Boolean).join(' · ');};
 /** The one line that says how a version differs from its neighbours (the three NVFP4 versions); empty for the rest. */
 export const versionNote=(model:string)=>{const nv=nvfp4Version(model);return nv?tr(nv.note):'';};
+/** The fork's uncensored families (setup.py FAMILIES orca / mrad / rvn, docs/FORK.md): Flash-Next GGUFs whose titles do not say so. */
+export const FORK_FAMILIES=['orca','mrad','rvn'];
+const FORK_EDITIONS:Record<string,string>={orca:'Uncensored (OrcaRouter)',mrad:'Uncensored (mradermacher)',rvn:'Uncensored (RVN)'};
 /** Display groups are distinct from the engine's installation family IDs. */
 export function nativeCatalogModels(families:NativeFamily[]):CatalogModel[]{
  if(!families.length)return[];
  const groups:CatalogModel[]=[{family:'qwen3.8',title:'Qwen3.8-Flash-Next',about:'',experimental:false,images:false,sizes:[]},{family:'qwen3.6',title:'Qwen3.6-35B-A3B',about:'',experimental:false,images:false,sizes:[]}];
  for(const family of families){
-  const target=/qwen3[._-]?6|35b[-_]?a3b/i.test(family.title+' '+family.family)?groups[1]:['qwen','swift','coder','unsloth','gyro'].includes(family.family)||/qwen3[._-]?8|flash.next/i.test(family.title)?groups[0]:undefined;
+  const target=/qwen3[._-]?6|35b[-_]?a3b/i.test(family.title+' '+family.family)?groups[1]:['qwen','swift','coder','unsloth','gyro',...FORK_FAMILIES].includes(family.family)||/qwen3[._-]?8|flash.next/i.test(family.title)?groups[0]:undefined;
   if(!target)continue;
-  const edition=target===groups[0]?({swift:'Swift 1.5',coder:'Coder',unsloth:'Unsloth',gyro:'Gyro'} as Record<string,string>)[family.family]??'':'';
+  const edition=target===groups[0]?({swift:'Swift 1.5',coder:'Coder',unsloth:'Unsloth',gyro:'Gyro',...FORK_EDITIONS} as Record<string,string>)[family.family]??'':'';
   target.images ||= family.images;
   target.sizes.push(...family.sizes.map(size=>({...size,sourceFamily:family.family,edition,images:family.images})));
  }

@@ -47,6 +47,9 @@ def http(url: str, start: int | None = None, end: int | None = None) -> bytes:
     headers = {"User-Agent": "quantscope"}
     if start is not None:
         headers["Range"] = f"bytes={start}-{end}"
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token and url.startswith("https://huggingface.co/"):   # the fork: a gated repository (orca) needs it
+        headers["Authorization"] = f"Bearer {token}"
     for attempt in range(5):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers),

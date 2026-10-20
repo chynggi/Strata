@@ -1,5 +1,9 @@
 # OrcaRouter IQ3_XXS compatibility
 
+> **This fork:** the installer and the app set this model up with the conversion below
+> (`START-HERE.bat --setup --family orca --model IQ3_XXS`, or "Uncensored models" in the app; OrcaRouter is gated, so
+> set `HF_TOKEN` or run `hf auth login` first). The steps on this page are the same thing by hand.
+
 Validated on Linux with an RTX 5090 (32 GB), Ryzen 9 9950X3D and 128 GB RAM on 2026-09-27.
 
 The target is `orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF`, **IQ3_XXS** (two shards, 85.20 GB total).

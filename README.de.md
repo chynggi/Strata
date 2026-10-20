@@ -186,7 +186,7 @@ Weitere Auswahl:
 - **[Swift 1.5](docs/MODELS.md#swift-15)** ist eine Feinabstimmung, die kürzer nachdenkt, bevor sie antwortet, bei etwa gleicher Qualität und gleichem RAM-Bedarf.
 - **[NVFP4](docs/NVFP4.md)** ist NVIDIAs 4-Bit-Version für NVIDIA-Karten. Sie braucht etwa 80 GB RAM, um alle Experten im RAM zu halten.
 - **[Qwen3.6-35B-A3B](docs/QWEN36.md)** ist ein kleineres, anderes Modell, das Bilder liest und mehrere Anfragen gleichzeitig beantworten kann.
-- **[OrcaRouters Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)** richtest du von Hand ein.
+- **[OrcaRouters Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)** installiert in diesem Fork der Installer und die App (`--family orca`, gesperrt: zuerst `HF_TOKEN` oder `hf auth login`).
 
 Alle Größen, Downloads und was wo läuft: [docs/MODELS.md](docs/MODELS.md).
 

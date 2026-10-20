@@ -179,7 +179,7 @@ Gyro は NVIDIA と AMD のカードで動きます（AMD は実験的）。Inte
 - **[Swift 1.5](docs/MODELS.md#swift-15)** はファインチューン版で、答える前に考える時間が短くなります。品質と RAM の必要量はほぼ同じです。
 - **[NVFP4](docs/NVFP4.md)** は NVIDIA カード向けの NVIDIA 製4ビット版です。すべてのエキスパートを RAM に置くには、約80 GBの RAM が必要です。
 - **[Qwen3.6-35B-A3B](docs/QWEN36.md)** は、より小さい別のモデルです。画像を読め、複数のリクエストに同時に答えられます。
-- **[OrcaRouter の Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)** は手動で設定します。
+- **[OrcaRouter の Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)** は、このフォークではインストーラーとアプリで入れられます（`--family orca`。ゲート付きなので先に `HF_TOKEN` か `hf auth login`）。
 
 すべてのサイズ、ダウンロード、どの構成で何が動くかは [docs/MODELS.md](docs/MODELS.md) にあります。
 
