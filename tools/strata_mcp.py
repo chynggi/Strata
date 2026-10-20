@@ -1697,7 +1697,9 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "unsloth = Unsloth's 4- to 8-bit files (UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, "
                                        "UD-Q6_K_XL, Q8_0): every expert in RAM where they fit, else part of them read "
                                        "from the SSD"},
-             "model": {"type": "string", "enum": list(models),
+             # the fork's families carry sizes setup's MODELS does not have (orca IQ2_M, rvn IQ3_XS): listed too
+             "model": {"type": "string", "enum": list(dict.fromkeys([*models, *(m for f in families.values()
+                                                                           for m in (f.get("sizes") or {}))])),
                        "description": "the size (quantization): see strata_models"},
              "context": {"type": "integer", "minimum": 1024, "maximum": 2097152, "examples": contexts,
                          "description": "context length in tokens (more needs more VRAM). Any whole number works, "

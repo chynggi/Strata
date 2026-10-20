@@ -101,6 +101,18 @@ class ForkLayout(unittest.TestCase):
         self.assertIn("HF_TOKEN", plan["gated"])
         self.assertEqual(args[args.index("--family") + 1], "orca")
 
+    def test_install_takes_the_uncensored_sizes_through_the_tool_call(self):
+        """The app installs through strata_install: its argument check must accept a size only a fork family has
+        (it once listed setup.MODELS alone and refused IQ2_M before install_plan ran)."""
+        srv = M.McpServer(self.s, __import__("io").BytesIO())
+        for family, model in (("orca", "IQ2_M"), ("orca", "IQ3_XXS"), ("mrad", "IQ3_S"), ("rvn", "IQ3_XS")):
+            with self.subTest(family=family, model=model):
+                r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "strata_install", "arguments": {"family": family, "model": model}}})
+                res = json.loads(r["result"]["content"][0]["text"])
+                self.assertNotIn("must be one of", res.get("error", ""), res)
+                self.assertEqual(res["plan"]["model"], model, res)
+
     def test_model_table_lists_the_uncensored_sizes(self):
         self.install_orca()
         orca = next(f for f in self.s.model_table(HW) if f["family"] == "orca")
