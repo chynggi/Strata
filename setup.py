@@ -9467,6 +9467,21 @@ def poly_tail_skip(cfg: dict, cfg_path: Path | None = None) -> None:
         write_config(cfg_path, cfg)
 
 
+def draft_model_refusal(path, fam: dict, d: dict) -> str | None:
+    """--draft-model PATH (opt-in): why it cannot replace this size's drafter, or None when it can.  Only a strata-poly
+    model with a draft model or draft block to replace takes one (Gemma 4's draft model, GLM's draft block)."""
+    if fam.get("engine") != "poly":
+        return f"--draft-model is for the strata-poly models; {fam.get('title', 'this model')} uses its own drafter"
+    if d.get("draft") == "own":
+        return f"{fam['title']}'s file of this size has its own draft block, so there is nothing to replace"
+    if not (d.get("draft_model") or fam.get("draft")):
+        return f"{fam['title']} has no draft model to replace"
+    p = Path(path)
+    if not p.is_file() or p.suffix.lower() != ".gguf":
+        return f"--draft-model {path} is not a .gguf file"
+    return None
+
+
 def poly_kv_whole(cfg: dict, cfg_path: Path | None = None) -> None:
     """A config of strata-poly on an AMD card gets --kv-whole: ROCm keeps the VRAM that cuMemUnmap() and
     cuMemRelease() gave back (issue #13), so the attention caches take theirs at load instead of as the
@@ -9539,6 +9554,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         model = names[int(ask("Size?", [str(i) for i in range(1, len(names) + 1)], str(names.index(model) + 1),
                               a.yes)) - 1]
     d = sizes[model]
+    if a.draft_model and draft_model_refusal(a.draft_model, fam, d):
+        fail(draft_model_refusal(a.draft_model, fam, d), "leave out --draft-model to use the drafter setup fetches")
     # images: the encoder on the GPU takes VRAM the experts would have, so a small card gets it on the CPU
     vision = "none"
     if sees:
@@ -9653,6 +9670,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     if guesser is not None and a.gguf_dir and not guesser.exists():
         guesser = Path(a.models_dir) / tag / guesser.name
     have_guesser = guesser is None or guesser.exists() and (done(guesser) or bool(a.gguf_dir) or whole_shard(guesser))
+    if a.draft_model:                                  # your own draft model: used where it is, never fetched or checked
+        guesser, have_guesser = Path(a.draft_model).resolve(), True
     # the image encoder, in the same places
     mmproj = models_dir / fam["mmproj"] if vision != "none" else None
     if mmproj is not None and a.gguf_dir and not mmproj.exists():
@@ -9718,7 +9737,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
             verify_poly_own(s, *sha[s.name], family)
         else:
             verify_poly_download(s, *sha[s.name], family)
-    if guesser is not None:
+    if guesser is not None and not a.draft_model:
         if not have_guesser:
             say("  Its draft model lets it guess a few words ahead and check them at once (faster answers).")
             download(d.get("hf", fam["hf"]) + d["draft_model"], guesser)
@@ -9751,7 +9770,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     # GLM's draft block is the model's, one for every size.  A size whose file leaves it out gets it here: the block
     # alone is downloaded, not the file it comes from.
     draft = None
-    if d.get("draft") != "own" and fam.get("draft"):
+    if d.get("draft") != "own" and fam.get("draft") and not a.draft_model:
         draft = find_in([data, *elsewhere], fam["draft"]) or data / fam["draft"]
         if not draft.exists():
             say("  The draft block lets the model guess a few words ahead and check them at once (faster answers).")
@@ -11799,6 +11818,9 @@ def main() -> int:
                     help="which drafter this model will use. dflash2: the MTP draft layer's ~5 GB are not downloaded (the DFlash2 drafter is fetched by `strata drafting fetch`); "
                          "the arguments keep the --mtp folder so a later switch to the MTP works. mtp (the default): the draft layer is fetched as before. Nothing is written about it "
                          "in the run config: the choice is its \"drafting\" key")
+    ap.add_argument("--draft-model", metavar="PATH",
+                    help="a strata-poly model (Gemma 4, GLM): your own draft model .gguf in place of the one setup "
+                         "fetches, used where it is (opt-in; for example a fine-tune's own assistant model)")
     ap.add_argument("--parallel", type=int, metavar="N",
                     help="up to N requests decode together (batch slots, opt-in; default: one at a time, the others "
                          "wait). Each slot takes VRAM from the expert cache; setup says what it recommends")
@@ -12285,6 +12307,8 @@ def main() -> int:
     if fam.get("gated"):
         say(f"  Gated model: downloading it needs a Hugging Face account that accepted its terms on {fam['gated']}")
         say("  and a token (HF_TOKEN, `hf auth login`, or pasted when asked).")
+    if a.draft_model and fam.get("engine") != "poly":
+        fail(draft_model_refusal(a.draft_model, fam, {}), "leave out --draft-model")
     if fam.get("engine") == "poly":                     # another engine: its own questions and steps
         return poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted)
     say()

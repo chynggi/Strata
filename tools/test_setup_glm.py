@@ -315,6 +315,34 @@ class Main(unittest.TestCase):
         self.assertEqual([Path(r[1]).name for r in self.runs], ["strata_tokenizer.py"])
         self.assertEqual(Path(cfg["args"][cfg["args"].index("--draft-model") + 1]), block)
 
+    def test_your_own_draft_model_is_used_and_no_block_is_fetched(self):
+        own = self.t / "mine" / "my-drafter.gguf"
+        own.parent.mkdir()
+        own.write_bytes(b"GGUF")
+        code, out, cfg = self.main(["--draft-model", str(own)])
+        self.assertEqual(code, 0, out)
+        self.assertEqual([Path(r[1]).name for r in self.runs], ["strata_tokenizer.py"])   # no glm_draft_fetch.py
+        self.assertEqual(Path(cfg["args"][cfg["args"].index("--draft-model") + 1]), own.resolve())
+        self.assertEqual(self.downloads, [setup.FAMILIES["glm"]["hf"] + FILE])
+
+    def test_gemma4s_draft_model_download_is_replaced_by_your_own(self):
+        own = self.t / "mine" / "gemma-4-assistant.gguf"
+        own.parent.mkdir()
+        own.write_bytes(b"GGUF")
+        code, out, cfg = self.main(["--draft-model", str(own)], family="gemma4", model="QAT-UD-Q4_K_XL", vram=12.0, ram=64.0)
+        self.assertEqual(code, 0, out)
+        d = setup.FAMILIES["gemma4"]["models"]["QAT-UD-Q4_K_XL"]
+        self.assertTrue(d.get("draft_model"))
+        self.assertFalse([u for u in self.downloads if u.endswith(Path(d["draft_model"]).name)], self.downloads)
+        self.assertEqual(Path(cfg["args"][cfg["args"].index("--draft-model") + 1]), own.resolve())
+
+    def test_a_draft_model_that_is_not_there_stops_before_anything_is_fetched(self):
+        code, out, cfg = self.main(["--draft-model", str(self.t / "nope.gguf")])
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a .gguf file", out)
+        self.assertEqual(self.downloads, [])
+        self.assertIsNone(cfg)
+
     def test_the_engine_keeps_its_own_profile(self):
         pack = self.t / "data" / "packs" / "glm-3.0bit"
         pack.mkdir(parents=True)
@@ -435,6 +463,25 @@ class Main(unittest.TestCase):
         self.assertEqual(setup.choices_from_config(next(self.t.glob("strata-glm*.json")))["cuda"], 12)
         code, out, cfg = self.main()
         self.assertEqual((cfg.get("cuda"), self.toolkit), (None, 13))
+
+
+class DraftModel(unittest.TestCase):
+    """--draft-model PATH (opt-in): your own draft model in place of the one setup fetches, for a strata-poly model that has one."""
+
+    def test_who_takes_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            own = Path(t) / "drafter.gguf"
+            own.write_bytes(b"GGUF")
+            gemma, glm = setup.FAMILIES["gemma4"], setup.FAMILIES["glm"]
+            self.assertIsNone(setup.draft_model_refusal(own, gemma, gemma["models"]["QAT-UD-Q4_K_XL"]))
+            self.assertIsNone(setup.draft_model_refusal(own, glm, {}))
+            self.assertIn("its own draft block", setup.draft_model_refusal(own, glm, {"draft": "own"}))   # REAP50's file
+            lfm = setup.FAMILIES["lfm25"]                  # no draft model and no draft block: nothing to replace
+            self.assertIn("no draft model", setup.draft_model_refusal(own, lfm, lfm["models"]["UD-Q4_K_XL"]))
+            self.assertIn("strata-poly", setup.draft_model_refusal(own, {"title": "Qwen3.8"}, {}))
+            self.assertIn("not a .gguf file", setup.draft_model_refusal(Path(t) / "nope.gguf", gemma, {"draft_model": "x"}))
+            (Path(t) / "notes.txt").write_text("x")
+            self.assertIn("not a .gguf file", setup.draft_model_refusal(Path(t) / "notes.txt", gemma, {"draft_model": "x"}))
 
 
 if __name__ == "__main__":

@@ -668,6 +668,7 @@ class Runner:
         self.tune_result: dict | None = None
         self.config_path: Path | None = None
         self._own_checked = False
+        self.custom_tag: str | None = None                  # a strata-poly fine-tune (setup.py --custom-gguf): its run config's tag
 
     # ---- small helpers
     def emit(self, stage: str, text: str, pct: float | None = None, level: str = "info", **data: Any) -> None:
@@ -973,9 +974,13 @@ class Runner:
                 args.append("--move-data")
             if s.data_dir:                                # a folder the person chose is remembered for the next start and for the app
                 args.append("--set-default-data-dir")
-        if s.model_path:
+        if s.model_path and self.custom_tag:
+            args += ["--custom-gguf", str(s.model_path)]       # a strata-poly fine-tune: setup matches it by its architecture
+        elif s.model_path:
             p = Path(s.model_path)
             args += ["--gguf-dir", str(p if p.is_dir() else p.parent)]
+        if s.draft_model:
+            args += ["--draft-model", str(s.draft_model)]
         if s.dsv41_package and s.family == "deepseek41":
             args += ["--dsv41-package", s.dsv41_package]
         if self.feed:                                     # --feed / STRATA_UPDATE_FEED: setup fetches the DeepSeek engine from it too
@@ -1027,7 +1032,7 @@ class Runner:
         return []
 
     def installed_state(self) -> tuple[Path | None, dict | None]:
-        tag = self.catalog.tag_of(self.s.family, self.s.model)
+        tag = self.custom_tag or self.catalog.tag_of(self.s.family, self.s.model)
         path = self.catalog.installed_config(tag)
         if path is None:
             return None, None
@@ -1047,7 +1052,8 @@ class Runner:
             if s.model_path:
                 want = Path(s.model_path).expanduser().resolve()
                 folder = want if want.is_dir() else want.parent
-                ggufs = [Path(a) for a in args if a.lower().endswith(".gguf")]
+                ggufs = [Path(a) for a in args if a.lower().endswith(".gguf")
+                         and not (s.draft_model and Path(a) == Path(s.draft_model).expanduser())]   # your own draft model lives where it is
                 if not ggufs or not all(_inside(g.resolve(), folder) for g in ggufs):
                     return False
                 if s.data_dir:
@@ -1485,6 +1491,8 @@ class Runner:
             raise LaunchError(problem[0], problem[1], 2)
         if self.deepseek_files():
             return
+        if self.poly_fine_tune():
+            return
         given = bool(s.family and s.model)
         try:
             plan = models.plan_import(models.absolute(s.model_path))
@@ -1517,6 +1525,28 @@ class Runner:
         s.family, s.model = fam, model
         s.model_path = models.import_target(s.model_path, plan)
         self.emit("model", f"These files are {fam} {model}.", None)
+
+    def poly_fine_tune(self) -> bool:
+        """A fine-tune of a strata-poly model (Gemma 4's Kitchoon, ...): the fingerprint table knows none of them, setup.py's --custom-gguf
+        matches the file by its architecture. Taken only when setup's matcher names a strata-poly family; every other file goes on to the
+        table as before. The family and size are setup's (they only set the estimates), so a preset that keeps them gets the same."""
+        s = self.s
+        mod = self.catalog.strata.setup_module()
+        if mod is None or not hasattr(mod, "resolve_custom_gguf"):
+            return False
+        import contextlib
+        import io
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):  # its words are for setup's own run
+                fam, model, shards = mod.resolve_custom_gguf(str(s.model_path))
+        except (Exception, SystemExit):                      # noqa: BLE001 - not a file setup can match: the table decides, as before
+            return False
+        if (mod.FAMILIES.get(fam) or {}).get("engine") != "poly":
+            return False
+        s.family, s.model = fam, model
+        self.custom_tag = (mod.FAMILIES[fam].get("tag", "") + mod.custom_gguf_tag(shards, model)).lower()
+        self.emit("model", f"These files are a {mod.FAMILIES[fam]['title']} model of your own; setup takes them as they are.", None)
+        return True
 
     # ---- 3. config and profile
     def resolved_drafting(self, family: str | None) -> str:

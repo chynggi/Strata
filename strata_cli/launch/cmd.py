@@ -87,6 +87,8 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
     g.add_argument("--dsv41-package", metavar="FILE", help="DeepSeek: the engine package you downloaded from the release page (.tar.gz or .zip); "
                                                           "it is checked and installed instead of being fetched")
     g.add_argument("--model-path", metavar="PATH", help="use model files you already have: a folder of shards or one .gguf file")
+    g.add_argument("--draft-model", metavar="FILE", help="a strata-poly model (Gemma 4, GLM): your own draft model .gguf in place of the one "
+                                                         "setup fetches, used where it is (for example a fine-tune's assistant model)")
     g.add_argument("--data-dir", metavar="DIR", help="where downloaded model files are stored (default: Strata's data folder)")
     g.add_argument("--move-data", action="store_true",
                    help="with --data-dir: move the models you already have into the new folder. Without it nothing is moved: your models stay "
@@ -222,6 +224,8 @@ def settings_from_args(a: argparse.Namespace, catalog=None) -> tuple[S.LaunchSet
         s.model_path = str(Path(a.model_path).expanduser())
         if not a.model:
             s.family = s.model = None
+    if getattr(a, "draft_model", None):
+        s.draft_model = str(Path(a.draft_model).expanduser())
     if a.model:
         if catalog is None:
             raise ValueError("The model list is not available in this Terminal; run it from the full Terminal install.")
@@ -942,7 +946,9 @@ def run_launch(a: argparse.Namespace) -> int:
                     _say(f"  model     {m.get('title') or f'{s.family} {s.model}'}{size}")
                 _say(f"  context   {S.context_label(s.context)}    pictures {PICTURE_WORDS.get(s.vision or 'off', s.vision)}    parallel {_parallel_word(plan, s)}")
                 _say(f"  download  {(plan.get('download') or {}).get('text', '')}")
-                if plan.get("drafting"):
+                if s.draft_model:
+                    _say(f"  drafting  your own draft model ({s.draft_model})")
+                elif plan.get("drafting"):
                     _say(f"  drafting  {plan['drafting'].replace('Drafting: ', '', 1)}")
                 if plan.get("speed"):
                     _say(f"  speed     {plan['speed'].replace('Speed: ', '', 1)}")

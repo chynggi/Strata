@@ -88,7 +88,8 @@ strata launch --show-key
 | --- | --- |
 | `--preset NAME` | Start a saved preset. Other flags change that start only; add `--save-preset` to keep them. |
 | `--family`, `--model` | The model family and size, for example `qwen`, `q2_0`. Any case. |
-| `--model-path PATH` | Use model files you already have: a folder of shards or one `.gguf`. |
+| `--model-path PATH` | Use model files you already have: a folder of shards or one `.gguf`. A fine-tune of a strata-poly model (for example a Gemma 4 26B-A4B one) is taken as it is, through setup's `--custom-gguf`. |
+| `--draft-model FILE` | A strata-poly model with a drafter (Gemma 4, GLM): your own draft model `.gguf` in place of the one setup fetches. Kept in the preset. |
 | `--data-dir DIR`, `--move-data` | Where new downloads go. `--move-data` also moves the models you already have. |
 | `--context SIZE` | `32k`, `64k`, `128k`, `256k` or a number of tokens. |
 | `--kv FORMAT` | Conversation memory format: `int8` (default), `q4_0` (half the memory), `k8v4`, `fp16`. |

@@ -115,6 +115,7 @@ class LaunchSettings:
     family: str | None = None                  # catalog family id (qwen, swift, coder, unsloth, gyro, nvfp4...)
     model: str | None = None                   # catalog size (IQ3_XXS ...)
     model_path: str | None = None              # "Use model files I already have": a .gguf file or a folder
+    draft_model: str | None = None             # strata-poly (Gemma 4, GLM): your own draft model .gguf in place of the one setup fetches (setup.py --draft-model)
     dsv41_package: str | None = None           # DeepSeek: the engine package the person downloaded by hand (checked, then installed)
     data_dir: str | None = None                # where model files are stored (None: the Strata default)
     gpus: list[int] | None = None              # None = the engine's choice (all usable cards)
@@ -336,6 +337,8 @@ def flags_text(s: LaunchSettings, *, preset: str | None = None) -> str:
             parts.append(f'--model-path "{s.model_path}"')
         if s.model:                                   # own files the table recognised say which model they are, so the line stays exact
             parts.append(f"--model {s.model.lower()}" + (f" --family {s.family}" if s.family and s.family != "qwen" else ""))
+        if s.draft_model:
+            parts.append(f'--draft-model "{s.draft_model}"')
         if s.data_dir:
             parts.append(f'--data-dir "{s.data_dir}"')
         if s.context:
