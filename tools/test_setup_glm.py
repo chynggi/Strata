@@ -256,7 +256,9 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "verify_sha256", lambda s, size, sha, own=False: self.verified.append((s.name, size, sha))),
             mock.patch.object(setup, "verify_poly_own", lambda s, size, sha, fam: self.verified.append((s.name, size, sha))),
             mock.patch.object(setup, "run", lambda cmd, *a, **k: self.runs.append([str(x) for x in cmd])),
-            mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: self.t / f"start-{tag}.sh"),
+            # writes the file upstream's write_run_script would name (run-<tag>-vision): poly_setup renames it run-<tag>
+            mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: (self.t / f"run-{tag}-vision.sh").touch()
+                              or self.t / f"run-{tag}-vision.sh"),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
             mock.patch.object(sys, "argv", ["setup.py", "--family", family,
                                             *(["--model", M if model is True else model] if model else []),
@@ -298,6 +300,9 @@ class Main(unittest.TestCase):
         self.assertEqual(cfg["model_name"], "glm-5.3-flash-3.0bit")
         self.assertEqual(Path(cfg["tokenizer"]), pack / "tokenizer")
         self.assertEqual(cfg["lib_dirs"], ["/cuda/lib64"])
+        # a strata-poly config (strata-<tag>.json) names no picture choice: run-<tag>.sh, not run-<tag>-vision.sh
+        self.assertEqual([s.name for s in self.t.glob("run-*.sh")], ["run-glm-3.0bit.sh"])
+        self.assertIn("start script: run-glm-3.0bit.sh", out)
         self.assertNotIn("vision", cfg)
         self.assertEqual(cfg["gpu"], 0)                                # as main() does for every model
 

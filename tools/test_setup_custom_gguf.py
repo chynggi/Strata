@@ -281,5 +281,17 @@ class CustomGgufTests(unittest.TestCase):
                     self.fail("expected SystemExit when resolved model not in family's size list")
 
 
+class StartScriptName(unittest.TestCase):
+    """poly_setup renames the start script run-<tag> (tools/test_setup_glm.py checks it); upstream's configs keep
+    their names, with the picture suffix as before."""
+
+    def test_upstream_names(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(setup, "home", lambda: Path(t)):
+            ext = ".bat" if setup.WIN else ".sh"
+            for stem, want in (("strata-q2_0-novision", "run-q2_0-novision"), ("strata-q2_0-vision", "run-q2_0-vision"),
+                               ("strata-q2_0", "run-q2_0-vision")):
+                self.assertEqual(setup.write_run_script("q2_0", Path(t) / f"{stem}.json", 8080).name, want + ext)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

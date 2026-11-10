@@ -9833,6 +9833,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     poly_kv_whole(cfg)
     write_setup_config(cfg_path, cfg, earlier)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
+    if script.exists():     # run-<tag>: a strata-poly config (strata-<tag>.json) names no picture choice, so no -vision
+        script = script.replace(script.with_name(f"run-{tag.lower()}{script.suffix}"))
     ok(f"start script: {script.name}")
 
     say()
