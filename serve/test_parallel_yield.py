@@ -338,6 +338,46 @@ class ParallelServiceYield(tp.FakeEngineCase):
             self.assertEqual(e._reap_orphan_slots(), [0])
             self.assertEqual(e.slot_busy, [False, True])
 
+    def test_a_release_hands_the_claim_over_before_its_wait_can_free_the_slot(self):
+        """#1994/#1603: the caller dropped its claim after starting the BDONE wait.  With the BDONE already queued the wait
+        freed the slot at once, the next request claimed it, and the late drop took THAT request's claim: the reaper
+        then freed the slot under it as ownerless and the engine refused the BGEN that followed."""
+        self.start(2)
+        e = self.engine
+        e.ORPHAN_SLOT_S = 0.0
+        with e.slot_cv:
+            e._claim_slot(0)                                         # request A in slot 0
+        e.slot_q[0].put("BDONE 0 9 stop 12.0\n")                     # its reply ended: the BDONE is already queued
+        e._release_slot_when_done(0)
+        self.assertNotIn(0, e.slot_claims)                           # handed over to the wait, nothing left to drop
+        t0 = time.time()
+        while e.slot_busy[0] and time.time() - t0 < 5:
+            time.sleep(0.01)
+        self.assertFalse(e.slot_busy[0])
+        with e.slot_cv:
+            e._claim_slot(0)                                         # request B takes the freed slot
+        time.sleep(0.1)
+        with e.slot_cv:
+            self.assertIn(0, e.slot_claims)                          # B's claim stands
+            self.assertEqual(e._reap_orphan_slots(), [])             # so the slot is never taken from under it
+
+    def test_an_old_sighting_does_not_cut_the_grace_of_a_slot_claimed_since(self):
+        """#1603: the reaper notes when it first saw a busy slot without an owner and frees it ORPHAN_SLOT_S later.  A
+        sighting kept across a claim made the next ownerless moment count from it, and the slot was freed at once."""
+        self.start(2)
+        e = self.engine
+        e.ORPHAN_SLOT_S = 0.3
+        with e.slot_cv:
+            e.slot_busy[0] = True                                    # ownerless for a moment (a park)
+            self.assertEqual(e._reap_orphan_slots(), [])             # seen, not yet freed
+        time.sleep(0.4)
+        with e.slot_cv:
+            e._claim_slot(0)                                         # a request takes it
+            e.slot_claims.discard(0)                                 # and hands it over: ownerless again, just now
+            self.assertEqual(e._reap_orphan_slots(), [])             # the grace starts here, not at the old sighting
+            self.assertTrue(e.slot_busy[0])
+
+
     def test_a_parallel_request_does_not_wait_for_the_fifo_on_a_loaded_engine(self):
         """#1603: parallel requests used to take the FIFO (held by an image encode, /v1/vram, load) just to find the
         engine loaded; between 'queued' and 'running' they were neither.  Loaded: no fifo.  Unloaded: they wait for it

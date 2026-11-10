@@ -426,7 +426,8 @@ class Catalog:
         models, families, _ctx, _src = self.tables()
         names = list(models)
         for fam_name, fam_d in families.items():       # DeepSeek-V4.1-Flash's size is not one of setup's MODELS
-            if fam_d.get("multi_file"):
+            # (nor are the fork's: its uncensored families' own "sizes", the strata-poly families' own "models", docs/FORK.md)
+            if fam_d.get("multi_file") or fam_d.get("models") or fam_d.get("sizes"):
                 names += [m for m in self.strata.sizes_of(models, fam_name) if m not in names]
         import re
         wanted = re.sub(r"(?i)^ista-das(?=-\d)", "IST-DAS", model)     # the set's name on screen is ISTA-DAS; its ids keep the first spelling

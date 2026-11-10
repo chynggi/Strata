@@ -347,7 +347,7 @@ class Table(unittest.TestCase):
         table = json.loads((models.ROOT / "data" / "gguf_fingerprints.json").read_text(encoding="utf-8"))
         missing = []
         for family, fam in setup.FAMILIES.items():
-            if fam.get("ready"):
+            if fam.get("ready") or fam.get("engine") == "poly":   # the PolyStrata families: no rows yet (docs/FORK.md)
                 continue
             for model, row in setup.MODELS.items():
                 if family not in row.get("families", ("qwen", "swift")):

@@ -70,6 +70,12 @@ FALLBACK_MODELS = {
                            "less than ~80 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "vision": True},
+    "3.0BIT": {"about": "the whole model: 3-bit GSQ-RCO experts, Q4_K attention", "download_gb": 113.6,
+               "ram_gb": 96, "arena_gb": 107.2, "families": ("glm",)},
+    "UD-IQ2_XXS": {"about": "the whole model at about 2 bits (Unsloth): less RAM, reads faster, writes slower",
+                   "download_gb": 101.8, "ram_gb": 82, "arena_gb": 92.5, "families": ("glm",)},
+    "REAP50-Q3_K_M": {"about": "half the routed experts (REAP50), 3-bit K-quant: less RAM", "download_gb": 78.8,
+                      "ram_gb": 60, "arena_gb": 72.1, "families": ("glm",)},
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic): K-quant experts, between UD-IQ4_XS and UD-Q5_K_XL in quality",
                    "download_gb": 111.3, "ram_gb": 48, "arena_gb": 77.0, "families": ("unsloth",), "budget": True,
                    "vision": True},                       # #967: images allowed (setup warns: untested with this file)
@@ -142,6 +148,121 @@ FALLBACK_FAMILIES = {
     "nvfp4": {"title": "Qwen3.8-Flash-Next (NVFP4)", "about": "4-bit NVFP4 experts, NVIDIA cards; a 128 GB download, "
                                                               "~80 GB of RAM to keep every expert in RAM",
               "tag": "nvfp4-"},
+    "glm": {"title": "GLM 5.3 Flash", "about": "another model, with its own engine: Linux, one NVIDIA card (run on "
+                                               "32 GB), 64-128 GB of RAM", "tag": "glm-", "engine": "poly",
+            "vision": False, "experimental": True},
+    "lfm25": {"title": "LFM2.5-24B-A2B", "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a "
+                                                   "15 GB file, ~20 GB of RAM beside an 8 GB card; four other sizes "
+                                                   "too, no images",
+              "tag": "lfm25-", "engine": "poly", "vision": False, "experimental": True,
+              "models": {"UD-Q4_K_XL": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
+                                        "download_gb": 14.9, "ram_gb": 20, "arena_gb": 14.0},
+                         "UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write: the least RAM",
+                                        "download_gb": 10.9, "ram_gb": 16, "arena_gb": 10.2},
+                         "QAD-Q4_0": {"about": "Liquid AI's 4-bit file, trained for that quantization",
+                                      "download_gb": 13.6, "ram_gb": 18, "arena_gb": 12.9},
+                         "UD-Q6_K_XL": {"about": "6-bit experts, 8-bit where they write",
+                                        "download_gb": 21.9, "ram_gb": 27, "arena_gb": 20.9},
+                         "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
+                                  "download_gb": 25.5, "ram_gb": 31, "arena_gb": 24.4}}},
+    "flint": {"title": "Flint 40B-A2.5B", "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a "
+                                                    "25 GB file, ~29 GB of RAM beside an 8 GB card; three other sizes "
+                                                    "too, no images",
+              "tag": "flint-", "engine": "poly", "vision": False, "experimental": True,
+              "models": {"UD-Q4_K_XL": {"about": "4- and 5-bit experts (Unsloth Dynamic)",
+                                        "download_gb": 25.1, "ram_gb": 29, "arena_gb": 23.1},
+                         "UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write: the least RAM",
+                                        "download_gb": 18.5, "ram_gb": 22, "arena_gb": 16.5},
+                         "UD-Q6_K_XL": {"about": "6-bit experts, 8-bit where they write",
+                                        "download_gb": 36.3, "ram_gb": 40, "arena_gb": 34.2},
+                         "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
+                                  "download_gb": 42.3, "ram_gb": 46, "arena_gb": 40.2}}},
+    "kolibri": {"title": "Kolibri 1",
+                "about": "on the strata-poly engine, with the kolibri1 patch: Linux or Windows, one or two NVIDIA cards "
+                         "(run on 32 GB, and on 12 GB under Windows); a 48 GB file, ~52 GB of RAM beside an 8 GB "
+                         "card; two other sizes too, no images",
+                "tag": "kolibri1-", "engine": "poly", "vision": False, "experimental": True,
+                "models": {"Q4_K_M": {"about": "4-bit: Q4_K gate/up, Q6_K down on half the layers",
+                                      "download_gb": 47.5, "ram_gb": 52, "arena_gb": 45.7},
+                           "Q2_K": {"about": "2-bit, the fastest: the least RAM",
+                                    "download_gb": 28.6, "ram_gb": 33, "arena_gb": 26.9},
+                           "Q3_K_M": {"about": "3-bit: the least RAM that still reads well",
+                                      "download_gb": 37.5, "ram_gb": 42, "arena_gb": 35.8}}},
+    # a family with sizes of its own ("models"): two of these have a size of one name
+    "qwen36poly": {"title": "Qwen3.6-35B-A3B", "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a "
+                                                     "17 GB file, ~21 GB of RAM beside an 8 GB card; a smaller and a "
+                                                     "larger size too",
+               "tag": "qwen36p-", "engine": "poly", "vision": True, "experimental": True,
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
+                                        "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6},
+                          "UD-Q2_K_XL": {"about": "2- and 3-bit i-quant experts (Unsloth Dynamic): the least RAM",
+                                         "download_gb": 12.6, "ram_gb": 17, "arena_gb": 10.8},
+                          "UD-Q4_K_M": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
+                                        "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.1}}},
+    "clover": {"title": "Clover-35B-A3B-Preview", "about": "on the strata-poly engine: one NVIDIA card, Linux or "
+                                                            "Windows; a 17 GB file, ~20 GB of RAM beside an 8 GB card; "
+                                                            "a smaller and a larger size too, no images",
+               "tag": "clover-", "engine": "poly", "vision": False, "experimental": True,
+               "models": {"Q3_K_M": {"about": "3-bit experts, 4- and 5-bit where they write",
+                                     "download_gb": 16.8, "ram_gb": 20, "arena_gb": 15.3},
+                          "APEX-I-NANOPLUS": {"about": "2- and 3-bit experts (APEX): the least RAM",
+                                              "download_gb": 12.6, "ram_gb": 16, "arena_gb": 10.8},
+                          "Q4_K_M": {"about": "4-bit experts, 6-bit where they write",
+                                     "download_gb": 21.2, "ram_gb": 25, "arena_gb": 19.5}}},
+    "ornith": {"title": "Ornith 1.5 35B-A3B", "about": "Qwen3.6-35B-A3B's architecture, other weights; a 17 GB file, "
+                                                        "~22 GB of RAM beside an 8 GB card; a smaller and a larger "
+                                                        "size too", "tag": "ornith-",
+               "engine": "poly", "vision": True, "experimental": True,
+               "models": {"APEX-I-COMPACT": {"about": "3- and 4-bit K-quant experts (APEX), its draft block in the "
+                                                      "file", "download_gb": 17.4, "ram_gb": 22, "arena_gb": 15.8},
+                          "APEX-I-MINI": {"about": "2- and 3-bit experts (APEX): the least RAM",
+                                          "download_gb": 14.4, "ram_gb": 18, "arena_gb": 12.9},
+                          "APEX-I-QUALITY": {"about": "4- to 6-bit experts (APEX)",
+                                             "download_gb": 23.7, "ram_gb": 28, "arena_gb": 21.6}}},
+    "gemma4": {"title": "Gemma 4 26B-A4B", "about": "on the strata-poly engine too; a 13 GB file, ~18 GB of RAM beside an 8 GB "
+                                                     "card; a smaller and a larger size too", "tag": "gemma4-",
+               "engine": "poly", "vision": True, "experimental": True,
+               "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), and Google's draft model for it",
+                                        "download_gb": 13.2, "ram_gb": 18, "arena_gb": 10.3},
+                          "UD-Q2_K_XL": {"about": "2-bit i-quant experts (Unsloth Dynamic): the least RAM; the same "
+                                                  "draft model", "download_gb": 11.0, "ram_gb": 15, "arena_gb": 8.7},
+                          "UD-Q4_K_M": {"about": "4- and 5-bit experts (Unsloth Dynamic); the same draft model",
+                                        "download_gb": 17.4, "ram_gb": 21, "arena_gb": 14.3},
+                          "QAT-UD-Q4_K_XL": {"about": "Google's QAT weights, 4-bit (Unsloth Dynamic), with their own "
+                                                      "draft model", "download_gb": 14.7, "ram_gb": 19, "arena_gb": 12.8}}},
+    "tiel": {"title": "Tiel Coder 35B-A3B", "about": "Ornith 1.5 quantized for coding, with the Sharp chat template; a "
+                                                    "17 GB file, ~21 GB of RAM beside an 8 GB card; a smaller and a "
+                                                    "larger size too", "tag": "tiel-",
+             "engine": "poly", "vision": True, "experimental": True,
+             "models": {"UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write; its draft block in "
+                                                "the file", "download_gb": 17.2, "ram_gb": 21, "arena_gb": 14.6},
+                        "UD-IQ3_XXS": {"about": "2-bit i-quant experts, 3-bit where they write: the least RAM",
+                                       "download_gb": 13.6, "ram_gb": 18, "arena_gb": 11.5},
+                        "UD-Q4_K_XL": {"about": "4-bit experts, 5- and 6-bit where they write",
+                                       "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.0}}},
+    "minicpmv": {"title": "MiniCPM-V 4.7 35B-A3B", "about": "Qwen3.6-35B-A3B's architecture, OpenBMB's weights, and it "
+                                                            "reads pictures too; a 22 GB file, ~25 GB of RAM beside an "
+                                                            "8 GB card; a smaller and a larger size too",
+                 "tag": "minicpmv-", "engine": "poly", "vision": True, "experimental": True,
+                 "models": {"Q4_K_M": {"about": "4-bit experts (K-quant), 5- and 6-bit where they write",
+                                       "download_gb": 21.2, "ram_gb": 25, "arena_gb": 19.5},
+                            "mix_q3gud_im": {"about": "3- and 4-bit experts (imatrix mix): the least RAM",
+                                             "download_gb": 15.5, "ram_gb": 19, "arena_gb": 13.8},
+                            "Q6_K": {"about": "6-bit experts (K-quant)",
+                                     "download_gb": 28.5, "ram_gb": 31, "arena_gb": 26.4}}},
+    "ornith122": {"title": "Ornith 1.5 122B",
+                  "about": "on the strata-poly engine: one NVIDIA card, Linux or Windows; a 60 GB file, ~47 GB of RAM beside a 24 GB card; 5 sizes, images",
+                  "tag": "ornith122-", "engine": "poly", "vision": True, "experimental": True,
+                  "models": {"UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write: the daily choice",
+                                            "download_gb": 59.8, "ram_gb": 47, "arena_gb": 53.3},
+                             "UD-Q2_K_XL": {"about": "2-bit i-quant experts (Unsloth Dynamic): the least RAM",
+                                            "download_gb": 44.5, "ram_gb": 32, "arena_gb": 38.5},
+                             "UD-IQ3_XXS": {"about": "2- and 3-bit i-quant experts: less RAM than UD-Q3_K_XL",
+                                            "download_gb": 49.5, "ram_gb": 37, "arena_gb": 43.2},
+                             "UD-Q4_K_XL": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
+                                            "download_gb": 79.7, "ram_gb": 66, "arena_gb": 73.0},
+                             "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
+                                      "download_gb": 132.6, "ram_gb": 119, "arena_gb": 125.8}}},
 }
 OWN_PATH_ENGINE = (0, 1, 45)   # the first engine that runs Qwen3.6-35B-A3B with pictures and parallel requests (setup.py MIN_ENGINE note)
 MEMORY_TIERS = ((62.0, "qwen", "IQ3_S"), (46.0, "qwen", "IQ3_XXS"), (38.0, "swift", "IQ2_XS"))   # as setup.py's: RAM + VRAM floors of the owner's 64 / 48 / 40 GB tiers
@@ -567,7 +688,7 @@ class Strata:
     def size_table(self, models, family) -> dict:
         """setup's sizes for a family: the family's own (the fork's community GGUFs), else MODELS' for it."""
         fam = self.tables()[1].get(family) or {}
-        return fam.get("sizes") or {m: d for m, d in models.items()
+        return fam.get("models") or fam.get("sizes") or {m: d for m, d in models.items()
                                     if family in d.get("families", ("qwen", "swift"))}
 
     def own_families(self) -> dict:
@@ -623,6 +744,13 @@ class Strata:
             return list(own["models"])
         sizes = self.size_table(models, family)
         return sorted(sizes, key=lambda m: bool(sizes[m].get("experimental")))
+
+    def sizes(self, family) -> dict:
+        """A family's sizes, each with what the tables say of it: its own ("models", the fork's "sizes", an own-path
+        family's), else the ones that name it."""
+        models, _families, _ctx, _src = self.tables()
+        table = self.size_table(models, family)
+        return {m: self.own_size(family, m) or table.get(m, {}) for m in self.sizes_of(models, family)}
 
     # ---- paths
     def settings_path(self) -> Path:
@@ -1327,7 +1455,8 @@ class Strata:
         else:
             return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Strata needs 32 GB or more "
                                                           "(the smallest model, the Coder, keeps ~23 GB of experts in "
-                                                          "RAM)"}
+                                                          "RAM); the 11-24 GB models on the strata-poly engine (family "
+                                                          "qwen36poly, ornith, gemma4 or tiel: experimental) want 15-28 GB"}
         ctx = 131072                                       # 128K on every card (owner, 2026-11-01)
         # #3425: the tiers count RAM + VRAM together, but the desktop keeps about 10 GB of the RAM and the card keeps ~6 GB for
         # its dense weights, so a PC at the floor of its tier reads part of the experts from the SSD at every answer.  Said
@@ -1387,7 +1516,7 @@ class Strata:
                                        if ram >= d["ram_gb"] else
                                        "slow here: part of its experts in RAM, the rest read from the SSD (setup "
                                        "asks first)" if ram >= 48 else "does not fit")
-                        elif not d.get("mem_total") and S and "sizes" not in fd and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
+                        elif not d.get("mem_total") and S and "sizes" not in fd and m in models and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
                             verdict = "fits in the low-RAM mode (slower: the GPU holds part of the experts)"
                     except Exception:                   # noqa: BLE001
                         pass
@@ -1914,7 +2043,12 @@ def own_ram_gb() -> float:
     try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemTotal"):
-                return int(line.split()[1]) * 1024 / 2**30
+                total = int(line.split()[1]) * 1024 / 2**30
+                try:                                    # a container's limit (cgroup v2), as setup's ram_gb()
+                    limit = open("/sys/fs/cgroup/memory.max").read().strip()
+                except OSError:
+                    limit = ""
+                return min(total, int(limit) / 2**30) if limit.isdigit() else total
     except OSError:
         pass
     return 0.0
@@ -2075,7 +2209,12 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
          "annotations": ro},
         {"name": "strata_models", "title": "Strata models",
          "description": "The models and sizes Strata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
-                        "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit), with download size, RAM needed, "
+                        "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit, glm = GLM 5.3 Flash, another "
+                        "model with its own engine, lfm25 = LFM2.5-24B-A2B, "
+                        "flint = Flint 40B-A2.5B, kolibri = Kolibri 1, qwen36poly = Qwen3.6-35B-A3B, ornith = Ornith 1.5, "
+                        "gemma4 = Gemma 4 26B-A4B and tiel = Tiel "
+                        "Coder 35B-A3B, 11-25 GB models on that engine), with "
+                        "download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
                         "Read-only.",
          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
@@ -2089,7 +2228,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
          "annotations": {"readOnlyHint": False, "destructiveHint": True}},
         {"name": "strata_install", "title": "Install Strata",
          "description": "Install a Strata model on this PC by running Strata's setup non-interactively in the "
-                        "background (Python packages, the engine, a 58-111 GB model download, preparation, start "
+                        "background (Python packages, the engine, a 13-114 GB model download, preparation, start "
                         "script). Without confirm=true it only returns the plan (what would be downloaded, disk "
                         "space): show it to the user and call again with confirm=true once they agree. Returns at "
                         "once; call it again (no arguments needed) to see the progress, or with cancel=true to stop "
@@ -2101,10 +2240,18 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "shorter), coder = the Coder (half the experts, ~32 GB RAM, for code), "
                                        "unsloth = Unsloth's 1- to 8-bit files (UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, "
                                        "UD-Q6_K_XL, Q8_0): every expert in RAM where they fit, else part of them read "
-                                       "from the SSD"},
+                                       "from the SSD; PolyStrata's models on the strata-poly "
+                                       "engine: glm = GLM 5.3 Flash (Linux, one NVIDIA card, 64-128 GB of RAM, a 79 or "
+                                       "114 GB download, no images), lfm25 = LFM2.5-24B-A2B, flint = Flint 40B-A2.5B, "
+                                       "kolibri = Kolibri 1 (Linux or Windows, one NVIDIA card, ~52 GB of RAM "
+                                       "beside an 8 GB card, a 48 GB download, no images), qwen36poly = "
+                                       "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = "
+                                       "Tiel Coder 35B-A3B (one NVIDIA card, an 11-25 GB download, "
+                                       "15-31 GB of RAM beside an 8 GB card by setup's estimate; images with "
+                                       "vision except LFM2.5 and Flint)"},
              # the fork's families carry sizes setup's MODELS does not have (orca IQ2_M, rvn IQ3_XS): listed too
              "model": {"type": "string", "enum": list(dict.fromkeys([*models, *(m for f in families.values()
-                                                                           for m in (f.get("sizes") or {}))])),
+                                                                           for m in (f.get("models") or f.get("sizes") or {}))])),
                        "description": "the size (quantization): see strata_models"},
              "context": {"type": "integer", "minimum": 1024, "maximum": 2097152, "examples": contexts,
                          "description": "context length in tokens (more needs more VRAM). Any whole number works, "
@@ -2411,11 +2558,20 @@ class Tools:
             family, model = rec["family"], rec["model"]
             context = context or rec["context"]
         elif model is None:
-            sizes = s.sizes_of(models, family)
+            sizes = s.sizes(family)
             model = rec["model"] if rec.get("family") == family else ("IQ3_XXS" if "IQ3_XXS" in sizes and
-                                                                     hw.get("ram_gb", 0) >= 60 else sizes[0])
+                                                                     hw.get("ram_gb", 0) >= 60 else next(iter(sizes)))
+            S = s.setup_module()
+            if families[family].get("engine") == "poly" and S and hw.get("ram_gb"):   # setup's own pick for this PC
+                cards = [g["vram_gb"] for g in hw.get("gpus", []) if g.get("usable")]
+                model = S.poly_default(sizes, hw["ram_gb"], max(cards, default=0.0))
         elif family is None:
-            fams = [f for f in families if model in s.sizes_of(models, f)]
+            fams = [f for f in families if model in s.sizes(f)]
+            if len(fams) > 1:                   # a family's own size yields to MODELS' (Tiel's UD-Q4_K_XL)
+                fams = [f for f in fams if "models" not in families[f]] or fams
+            if len(fams) > 1 and "qwen" not in fams:
+                raise ToolError(f"{model} is a size of " + " and of ".join(families[f]["title"] for f in fams)
+                                + ": give family too (" + " or ".join(fams) + ")")
             family = "qwen" if "qwen" in fams else fams[0]
         if family not in families:
             raise ToolError(f"unknown family {family}; the families: {', '.join(families)}")
@@ -2452,6 +2608,8 @@ class Tools:
             usable = s.engine_gpus(hw)
             vram = max((g["vram_gb"] for g in usable), default=12)
             context = 131072                          # 128K on every card (owner, 2026-11-01; strata_control/default_context.py)
+            if families[family].get("engine") == "poly":
+                context = 32768                         # strata-poly: the one it was measured with, setup's own default
         if vision in ("yes", "gpu", "cpu") and md.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is None:

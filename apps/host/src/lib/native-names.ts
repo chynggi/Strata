@@ -3,7 +3,11 @@
  * installation gives it (the family tag in front of the lower-cased quantization). The long name stays available as a tooltip.
  */
 const FAMILIES: [string, string][] = [['swift-', 'Swift'], ['coder-', 'Coder'], ['unsloth-', 'Unsloth'], ['gyro-gyro-', 'Gyro'], ['gyro-', 'Gyro'], ['nvfp4-', 'NVFP4'], ['qwen36-', 'Qwen3.6'],
-  ['orca-', 'OrcaRouter'], ['mrad-', 'mradermacher'], ['rvn-', 'RVN']];   // the fork's uncensored families (docs/FORK.md)
+  ['orca-', 'OrcaRouter'], ['mrad-', 'mradermacher'], ['rvn-', 'RVN'],   // the fork's uncensored families (docs/FORK.md)
+  // the fork's strata-poly families (setup.py FAMILIES "tag", from PolyStrata): Ornith 122B before Ornith
+  ['glm-', 'GLM 5.3 Flash'], ['lfm25-', 'LFM2.5'], ['flint-', 'Flint'], ['kolibri1-', 'Kolibri 1'], ['qwen36p-', 'Qwen3.6 (strata-poly)'],
+  ['clover-', 'Clover'], ['ornith122-', 'Ornith 1.5 122B'], ['ornith-', 'Ornith 1.5'], ['gemma4-', 'Gemma 4'], ['tiel-', 'Tiel Coder'],
+  ['minicpmv-', 'MiniCPM-V 4.7']];
 
 /**
  * The three NVFP4 versions, named by who made the weights (the plain model names NVFP4 / NVFP4-NVIDIA / NVFP4-QAD looked like the same thing):

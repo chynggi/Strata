@@ -54,6 +54,7 @@ function setBusy() {}
 function renderChat() {}
 function poll() {}
 function fitHeader() {}
+function loadModels() {}                 // the header model picker (PolyStrata's, docs/FORK.md)
 const requestAnimationFrame = () => {};
 async function loadHealth() { await fetch("health"); }
 async function loadMcp() { await fetch("v1/mcp"); }

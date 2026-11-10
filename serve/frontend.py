@@ -15,6 +15,7 @@ and the formats change often; the engine boundary is token ids in, text deltas o
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -49,9 +50,13 @@ class ChatTemplate:
 
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
         env.filters["tojson"] = tojson
+        env.filters["from_json"] = json.loads           # DeepSeek V4's template reads a call's arguments with it
         env.globals["raise_exception"] = raise_exception
         self.source = Path(path).read_text(encoding="utf-8")
-        self.template = env.from_string(self.source)
+        # transformers' {% generation %} (LFM2's template) marks the assistant's text for training; here it is a
+        # block that always renders
+        source = re.sub(r"({%-?\s*)endgeneration(\s*-?%})", r"\1endif\2", self.source)
+        self.template = env.from_string(re.sub(r"({%-?\s*)generation(\s*-?%})", r"\1if true\2", source))
         self.caps = self._detect_caps()
 
     def render(self, messages: list[dict], tools: list[dict] | None = None, add_generation_prompt: bool = True,
@@ -141,6 +146,7 @@ EFFORT_DEEPSEEK = {"none": None, "off": None, "minimal": None, "disabled": None,
                    "low": "low", "medium": "medium", "high": "high", "xhigh": "max", "max": "max", "maximum": "max"}
 _EFFORT_QWEN = dict(EFFORT)
 _NUMERIC_EFFORT = False
+_TEMPLATE_IDS = False       # tool-call ids reach the template only for PolyStrata's models (Gemma 4 names an answer by them)
 
 
 def use_family(family: str | None) -> None:
@@ -149,6 +155,13 @@ def use_family(family: str | None) -> None:
     EFFORT.clear()
     EFFORT.update(EFFORT_DEEPSEEK if family == "deepseek41" else _EFFORT_QWEN)
     _NUMERIC_EFFORT = family == "deepseek41"
+
+
+def use_template_ids(on: bool) -> None:
+    """Whether the tool-call ids reach the chat template (module state): the strata-poly models' non-ChatML templates
+    (serve/server.py POLY_PRE_TOKENIZERS; Gemma 4 names an answer by its call's id).  Off: upstream's prompts."""
+    global _TEMPLATE_IDS
+    _TEMPLATE_IDS = bool(on)
 
 
 def effort_kwargs(value) -> dict:
@@ -570,8 +583,12 @@ def _order_chat_tool_results(messages: list[dict]) -> None:
         i = j
     for message in messages:
         message.pop("_call_id", None)
+        if not _TEMPLATE_IDS:
+            message.pop("tool_call_id", None)
         for call in message.get("tool_calls") or []:
             call.pop("_call_id", None)
+            if not _TEMPLATE_IDS:
+                call.pop("id", None)
 
 
 def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
@@ -590,6 +607,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             out["_call_id"] = m.get("tool_call_id")
         if m.get("reasoning_content"):
             out["reasoning_content"] = m["reasoning_content"]
+        if role == "tool" and m.get("tool_call_id"):    # which call it answers: a template may name the tool by it
+            out["tool_call_id"] = m["tool_call_id"]
         if m.get("tool_calls"):
             calls = []
             for c in _object_list(m["tool_calls"], "tool_calls"):
@@ -597,7 +616,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
                 if not isinstance(fn, dict):
                     raise ValueError("tool_calls must be a list of objects (each with a \"function\" object)")
                 calls.append({"function": {"name": fn.get("name"), "arguments": tool_arguments(fn.get("arguments"))},
-                              "_call_id": c.get("id")})
+                              "_call_id": c.get("id"), **({"id": c["id"]} if c.get("id") else {})})
             out["tool_calls"] = calls
         messages.append(out)
     _order_chat_tool_results(messages)
@@ -610,11 +629,15 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     # `false` is a level (thinking off, effort_kwargs): an `or` between the two fields dropped it
     kwargs.update(effort_kwargs(given if given is not None and given != "" else reasoning.get("effort")))
     # the vLLM / llama.cpp convention: {"chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "low"}}
-    for k, v in (req.get("chat_template_kwargs") or {}).items():
+    ctk = req.get("chat_template_kwargs") or {}
+    for k, v in ctk.items():
         if k == "enable_thinking" and not v:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
+    # #25: earlier turns keep their thinking (Qwen3.6's template), as llama.cpp's --chat-template-kwargs passes it
+    if isinstance(ctk.get("preserve_thinking"), bool):
+        kwargs["preserve_thinking"] = ctk["preserve_thinking"]
     return _env_to_user(_late_system_to_user(messages)), tools, kwargs
 
 
@@ -707,14 +730,15 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
                 calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))},
-                              "_call_id": block.get("id")})
+                              "_call_id": block.get("id"), **({"id": block["id"]} if block.get("id") else {})})
             elif kind == "tool_result":
                 # A tool's image (Claude Code's Read of a picture) reaches the encoder like a user's, as the OpenAI
                 # path's tool messages already do; a text-only result is one string, as before.
                 messages.append({"role": "tool", "content": _parts_of(_check_parts(
                     _tool_references(block.get("content"), deferred),
                     f"messages[{i}].content[{j}].content", TEXT_PARTS + IMAGE_PARTS)),
-                                 "_call_id": block.get("tool_use_id")})
+                                 "_call_id": block.get("tool_use_id"),
+                                 **({"tool_call_id": block["tool_use_id"]} if block.get("tool_use_id") else {})})
         if text or calls or reasoning or parts:
             # an image sent beside tool results stays in this turn instead of being dropped
             out = {"role": m["role"], "content": _parts_of(parts) if _has_image(parts) else "".join(text)}
@@ -738,18 +762,19 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
         req["reasoning_budget_tokens"] = bt
     if isinstance(thinking, dict) and thinking.get("type") == "disabled":
         kwargs["enable_thinking"] = False
+    elif thinking is None and not req.get("reasoning_budget_tokens") and not think_unasked:
+        # Opt-in (the config's "anthropic_thinking": "on_request"; the default thinks as 0.1.31 did, since a
+        # client that never asks would otherwise lose the thinking on every turn).  Anthropic's thinking is
+        # opt-in there, and an effort alone does not ask for it. Claude Code's helper calls (a session title, a
+        # topic check) ask for none and allow a few dozen tokens, which the model otherwise spent thinking and
+        # answered with no text at all; 2.1.282's title call also sends effort high.  The Chat settings' effort
+        # still applies: Service.with_shared sets "thinking" with it.  A request that gives its own
+        # reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
+        kwargs["enable_thinking"] = False
     elif effort:
         kwargs.update(effort_kwargs(effort))
     elif isinstance(thinking, dict) and thinking.get("budget_tokens"):
         kwargs.update(budget_effort(thinking["budget_tokens"]))
-    elif thinking is None and not req.get("reasoning_budget_tokens") and not think_unasked:
-        # Opt-in (the config's "anthropic_thinking": "on_request"; the default thinks as 0.1.31 did, since a
-        # client that never asks would otherwise lose the thinking on every turn).  Anthropic's thinking is
-        # opt-in there. Claude Code's helper calls (a session title, a topic check) ask for none
-        # and allow a few dozen tokens, which the model otherwise spent thinking and answered with no text at all.
-        # A config's reasoning_effort still applies: Service.with_shared sets output_config before this runs.  A
-        # request that gives its own reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
-        kwargs["enable_thinking"] = False
     return _env_to_user(_late_system_to_user(messages)), tools, kwargs
 
 
@@ -1141,6 +1166,15 @@ def coerce_value(value: str, declared, notes: list | None = None):
     return v
 
 
+def param_value(value: str, declared, notes: list | None = None) -> object:
+    """coerce_value(), and a boolean written as Python's True / False (Qwen3.6 writes it now and then) as a boolean:
+    the value of a parameter in GLM's, Gemma's, DeepSeek V4's and LFM2's calls."""
+    v = coerce_value(value, declared, notes)
+    if declared == "boolean" and isinstance(v, str) and v.strip().lower() in ("true", "false"):
+        return v.strip().lower() == "true"
+    return v
+
+
 def parse_tool_call(body: str, schema: dict | None = None, notes: list | None = None) -> ToolCall:
     """`<function=NAME>\\n<parameter=P>\\nVALUE\\n</parameter>...</function>` -> ToolCall. Values are JSON-decoded
     when the tool's schema says the parameter is not a string (or, without a schema, when they parse as JSON
@@ -1167,6 +1201,253 @@ def parse_tool_call(body: str, schema: dict | None = None, notes: list | None = 
     return ToolCall(name=name, arguments=args)
 
 
+ARG_KEY, ARG_KEY_END = "<arg_key>", "</arg_key>"
+ARG_VALUE, ARG_VALUE_END = "<arg_value>", "</arg_value>"
+
+
+def glm_call_name(text: str) -> str | None:
+    """A GLM call's name, or None while it is still arriving."""
+    at = [i for i in (text.find(ARG_KEY), text.find(CALL_END)) if i >= 0]
+    return text[:min(at)].strip() if at else None
+
+
+def glm_call_end(text: str) -> int:
+    """Where a GLM tool call's body ends: the first `</tool_call>` right after the name or an `</arg_value>`, so an
+    argument value may contain the tag.  -1: not complete yet."""
+    at = text.find(CALL_END)
+    while at >= 0:
+        before = text[:at].rstrip()
+        if before.endswith(ARG_VALUE_END) or ARG_KEY not in before:
+            return at
+        at = text.find(CALL_END, at + 1)
+    return -1
+
+
+def parse_glm_tool_call(body: str, schema: dict | None = None) -> ToolCall:
+    """`NAME<arg_key>K</arg_key><arg_value>V</arg_value>...` -> ToolCall (GLM's chat template writes calls this
+    way).  Values are typed as in parse_tool_call."""
+    name, _, rest = body.partition(ARG_KEY)
+    props = ((schema or {}).get("parameters") or {}).get("properties") or {}
+    args = {}
+    for part in rest.split(ARG_KEY) if rest else []:
+        key, _, tail = part.partition(ARG_KEY_END)
+        value = tail.partition(ARG_VALUE)[2]
+        end = value.rfind(ARG_VALUE_END)        # the last one: a value may quote the tag
+        value = value[:end] if end >= 0 else value
+        args[key.strip()] = param_value(value, (props.get(key.strip()) or {}).get("type"))
+    return ToolCall(name=name.strip(), arguments=args)
+
+
+# Gemma 4 writes a call as <|tool_call>call:NAME{key:value,...}<tool_call|>.  A value is a string between two
+# <|"|> tokens, a number, true, false, null, a {key:value} mapping or a [value] list (its chat template's
+# format_argument; llama.cpp's common/parsers/gemma4.cpp reads the same).
+GEMMA_CALL, GEMMA_CALL_END, GEMMA_QUOTE = "<|tool_call>", "<tool_call|>", '<|"|>'
+
+
+def gemma_call_name(text: str) -> str | None:
+    """A Gemma call's name, or None while it is still arriving."""
+    at = [i for i in (text.find("{"), text.find(GEMMA_CALL_END)) if i >= 0]
+    return text[:min(at)].strip().removeprefix("call:") if at else None
+
+
+def gemma_call_end(text: str) -> int:
+    """Where a Gemma tool call's body ends: the first `<tool_call|>` that is not inside a string.  -1: not yet."""
+    pos = 0
+    while True:
+        quote, end = text.find(GEMMA_QUOTE, pos), text.find(GEMMA_CALL_END, pos)
+        if end >= 0 and (quote < 0 or end < quote):
+            return end
+        close = text.find(GEMMA_QUOTE, quote + len(GEMMA_QUOTE)) if quote >= 0 else -1
+        if close < 0:
+            return -1
+        pos = close + len(GEMMA_QUOTE)
+
+
+def _gemma_value(s: str, i: int):
+    """The value of Gemma's call notation that starts at s[i] -> (value, the index after it).  Text that ends
+    early (a call the output stopped in) gives what was there."""
+    while i < len(s) and s[i].isspace():
+        i += 1
+    if s.startswith(GEMMA_QUOTE, i):
+        i += len(GEMMA_QUOTE)
+        end = s.find(GEMMA_QUOTE, i)
+        return (s[i:], len(s)) if end < 0 else (s[i:end], end + len(GEMMA_QUOTE))
+    if s.startswith(("{", "["), i):
+        mapping, close = s[i] == "{", "}" if s[i] == "{" else "]"
+        out, i = ({} if mapping else []), i + 1
+        while True:
+            while i < len(s) and (s[i].isspace() or s[i] == ","):
+                i += 1
+            if i >= len(s) or s[i] == close:
+                return out, i + 1
+            if mapping:
+                colon = s.find(":", i)
+                if colon < 0:
+                    return out, len(s)
+                key, i = s[i:colon].strip().removeprefix(GEMMA_QUOTE).removesuffix(GEMMA_QUOTE), colon + 1
+                out[key], i = _gemma_value(s, i)
+            else:
+                value, i = _gemma_value(s, i)
+                out.append(value)
+    end = i
+    while end < len(s) and s[end] not in ",}]":
+        end += 1
+    word = s[i:end].strip()
+    try:
+        return json.loads(word), end
+    except ValueError:
+        return word, end
+
+
+def parse_gemma_tool_call(body: str, schema: dict | None = None) -> ToolCall:
+    """`call:NAME{key:value,...}` -> ToolCall.  A parameter the tool's schema declares a string stays one when the
+    model wrote it bare."""
+    brace = body.find("{")
+    args = _gemma_value(body, brace)[0] if brace >= 0 else {}
+    props = ((schema or {}).get("parameters") or {}).get("properties") or {}
+    for key, value in args.items():
+        if (props.get(key) or {}).get("type") == "string" and not isinstance(value, str):
+            args[key] = json.dumps(value, ensure_ascii=False)
+    return ToolCall(name=gemma_call_name(body + GEMMA_CALL_END), arguments=args)
+
+
+# DeepSeek V4 writes its calls in DSML: a <｜DSML｜tool_calls> block of <｜DSML｜invoke name="NAME"> calls, each with
+# <｜DSML｜parameter name="KEY" string="true|false">VALUE</｜DSML｜parameter> lines; string="false" is a JSON value
+# (its chat template).  A call here is one invoke; the block around the calls is not content.
+DSML = "｜DSML｜"
+DSML_INVOKE, DSML_INVOKE_END = "<" + DSML + 'invoke name="', "</" + DSML + "invoke>"
+DSML_PARAM, DSML_PARAM_END = "<" + DSML + "parameter", "</" + DSML + "parameter>"
+DSML_BLOCK = ("<" + DSML + "tool_calls>", "</" + DSML + "tool_calls>")
+_DSML_PARAM = re.compile(re.escape(DSML_PARAM) + r'\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>(.*?)'
+                         + re.escape(DSML_PARAM_END), re.S)
+
+
+def dsml_call_name(text: str) -> str | None:
+    """A DSML call's name, or None while it is still arriving."""
+    at = text.find('"')
+    return text[:at].strip() if at >= 0 else None
+
+
+def dsml_call_end(text: str) -> int:
+    """Where a DSML call's body ends: the first `</｜DSML｜invoke>` right after the name or a parameter's end, so a
+    value may contain the tag.  -1: not complete yet."""
+    at = text.find(DSML_INVOKE_END)
+    while at >= 0:
+        before = text[:at].rstrip()
+        if before.endswith(DSML_PARAM_END) or DSML_PARAM not in before:
+            return at
+        at = text.find(DSML_INVOKE_END, at + 1)
+    return -1
+
+
+def parse_dsml_tool_call(body: str, schema: dict | None = None) -> ToolCall:
+    """`NAME">` and its parameter lines -> ToolCall.  A string="false" value is JSON; one that is not, or a value
+    without the attribute, is typed as parse_tool_call types it."""
+    name = dsml_call_name(body + '"') or ""
+    props = ((schema or {}).get("parameters") or {}).get("properties") or {}
+    args = {}
+    for key, kind, value in _DSML_PARAM.findall(body):
+        declared = (props.get(key) or {}).get("type")
+        if kind == "true":
+            args[key] = value
+            continue
+        try:
+            args[key] = json.loads(value) if kind == "false" else param_value(value, declared)
+        except ValueError:
+            args[key] = param_value(value, declared)
+    return ToolCall(name=name, arguments=args)
+
+
+# LFM2 writes its calls as a Python list between two tokens: <|tool_call_start|>[f(a='x', b=1), g()]<|tool_call_end|>.
+# A string is a Python literal; a list or a mapping is JSON (its chat template's format_arg_value).  One block can
+# hold several calls.
+LFM2_CALL, LFM2_CALL_END = "<|tool_call_start|>", "<|tool_call_end|>"
+_LFM2_NAME = re.compile(r"[\s,\[]*([\w.\-]+)\s*\(")
+_LFM2_KEY = re.compile(r"[\s,]*(\w+)\s*=\s*")
+_LFM2_WORD, _LFM2_CLOSE = re.compile(r"[^,)]*"), re.compile(r"\s*\)")
+_LFM2_WORDS = {"true": True, "True": True, "false": False, "False": False, "null": None, "None": None}
+
+
+def lfm2_call_name(text: str) -> str | None:
+    """The first call's name in an LFM2 block, or None while it is still arriving."""
+    m = _LFM2_NAME.match(text)
+    return m.group(1) if m else None
+
+
+def lfm2_call_end(text: str) -> int:
+    return text.find(LFM2_CALL_END)
+
+
+def _lfm2_close(s: str, i: int) -> int:
+    """The index after the string, list or mapping that starts at s[i] (the end of s when it does not close)."""
+    depth, quote = 0, ""
+    while i < len(s):
+        c = s[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = ""
+                if not depth:
+                    return i + 1
+        elif c in "'\"":
+            quote = c
+        elif c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+            if not depth:
+                return i + 1
+        i += 1
+    return len(s)
+
+
+def _lfm2_value(s: str, i: int):
+    """The argument value that starts at s[i] -> (value, the index after it)."""
+    if i < len(s) and s[i] in "'\"[{":
+        end = _lfm2_close(s, i)
+        text = s[i:end]
+        for read in (json.loads, ast.literal_eval) if s[i] in "[{" else (ast.literal_eval,):
+            try:
+                return read(text), end
+            except (ValueError, SyntaxError, TypeError):
+                pass
+        return text, end
+    m = _LFM2_WORD.match(s, i)
+    word = m.group().strip()
+    if word in _LFM2_WORDS:
+        return _LFM2_WORDS[word], m.end()
+    try:
+        return json.loads(word), m.end()
+    except ValueError:
+        return word, m.end()
+
+
+def parse_lfm2_tool_calls(body: str, schema: dict | None = None) -> list[ToolCall]:
+    """`[f(a='x', b=1), g()]` -> one ToolCall a call.  The values carry their types, so the schema is not read."""
+    calls, i = [], 0
+    while m := _LFM2_NAME.match(body, i):
+        name, args, i = m.group(1), {}, m.end()
+        while k := _LFM2_KEY.match(body, i):
+            args[k.group(1)], i = _lfm2_value(body, k.end())
+        if close := _LFM2_CLOSE.match(body, i):
+            i = close.end()
+        calls.append(ToolCall(name=name, arguments=args))
+    return calls
+
+
+def gemma_model_turn(prompt: str, thinking: bool) -> str:
+    """Gemma's template opens no turn for the model after an answer that came with text, tool calls and their
+    results: the prompt ends on that closed turn and, with thinking on, on a thought opened outside any turn.  This
+    ends it as the template ends every other prompt.  (llama.cpp adds the turn too, in the case without thinking.)"""
+    thought = "<|channel>thought\n"
+    if prompt.endswith("<turn|>\n" + thought):
+        prompt = prompt[:-len(thought)]
+    if prompt.endswith("<turn|>\n"):
+        prompt += "<|turn>model\n" + ("" if thinking else thought + "<channel|>")
+    return prompt
+
+
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
 
 
@@ -1175,10 +1456,38 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, declared_only: bool = False, deferred: bool = False):
-        self.state = "reasoning" if thinking else "content"
+                 recover: bool = False, declared_only: bool = False, deferred: bool = False,
+                 call_format: str = "function", opened: bool = False):
+        # GLM's <arg_key>/<arg_value> calls and Gemma's call:NAME{...} instead of <function=...>: such a call is
+        # announced when its name is complete and its arguments follow whole.  (its name, its end, its parser)
+        # What tells a <function=...> call from a quoted one, or recovers one written beside the template's form
+        # (a call inside the reasoning, `recover`), reads that form only and is not applied to these.
+        self.whole = {"glm": (glm_call_name, glm_call_end, parse_glm_tool_call),
+                      "gemma": (gemma_call_name, gemma_call_end, parse_gemma_tool_call),
+                      "dsml": (dsml_call_name, dsml_call_end, parse_dsml_tool_call),
+                      "lfm2": (lfm2_call_name, lfm2_call_end, parse_lfm2_tool_calls)}.get(call_format)
+        self.call_start, self.call_stop = {"gemma": (GEMMA_CALL, GEMMA_CALL_END),
+                                           "dsml": (DSML_INVOKE, DSML_INVOKE_END),
+                                           "lfm2": (LFM2_CALL, LFM2_CALL_END)}.get(call_format,
+                                                                                   (CALL_START, CALL_END))
+        # tags around the calls that are neither a call nor content (DeepSeek V4's block of calls)
+        self.noise = DSML_BLOCK if call_format == "dsml" else ()
+        # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; the others' reasoning
+        # is opened by the prompt and ends with </think>.  `opened`: this prompt ended on Gemma's opening (its
+        # template writes it after a tool's answer), so the reply starts inside the reasoning.  GLM's calls come
+        # with <think> either way: GLM's template opens it in the prompt (`opened`), Flint writes it itself.
+        self.think_open, self.think_end = ("<|channel>thought\n", "<channel|>") if call_format == "gemma" \
+            else ("<think>", THINK_END) if call_format == "glm" else ("", THINK_END)
+        # #537 tells a quoted </think> by the line break the end has after it.  GLM's and Gemma's answers follow
+        # their end tag at once ('say "Paris."</think>Paris'), so there every end tag ends the reasoning
+        self.quotes_end = call_format == "function"
+        # the reply may still start with think_open.  Asked not to think, Gemma can still open with a thought
+        # (an empty one, after a tool's answer): it is read either way
+        self.opening = bool(self.think_open) and not opened
+        self.state = "reasoning" if thinking and (opened or not self.think_open) else "content"
         self.buf = ""
-        self.lead = False
+        # newlines the answer starts with are dropped: LFM2 writes one after the </think> its prompt ends on
+        self.lead = self.state == "content"
         self.schemas = {t.get("name"): t for t in tools or []}
         # #4663: the request defers tools (Anthropic's tool search, see anthropic_tools): the client holds back more tools
         # than it declares, so a call for an undeclared name is a call too - Claude Code runs it, where text ended the turn.
@@ -1242,7 +1551,7 @@ class OutputParser:
         # recover (on in the server since 0.2.8, off for a bare OutputParser; the config's "tool_call_recovery": false turns it off): a declared tool's call written next to the template's
         # form is the call - `<parameter=NAME>` as the opener, JSON inside <tool_call>, a bare <function=NAME> at the
         # start of a line outside code, or a second call in the same <tool_call> (which otherwise merges into one).
-        self.recover = recover
+        self.recover = recover and not self.whole
         self.bare = False            # the call being read opened with <function= alone (no <tool_call> around it)
         self.batch = False           # the call being finished is followed by another in the same wrapper
         self._final = False          # #4701: the turn has ended: a call held for what might follow it is decided now
@@ -1480,6 +1789,7 @@ class OutputParser:
         self.sdeclared = {}
         self.spname = None
         self.svstart = 0
+        self.stype = None            # the declared type of the parameter in "raw"
 
     def _wrapped_call_end(self) -> int:
         # Without a closing tag the structural walk cannot finish. Search only
@@ -1537,7 +1847,7 @@ class OutputParser:
                         args('"')
                         self.ss, self.sval_started = "str", False
                     else:
-                        self.ss = "raw"
+                        self.ss, self.stype = "raw", self.sdeclared.get(pname)
                 elif stripped.startswith("</function>"):
                     self.sp += len("</function>")
                     self.ss = "function_done"
@@ -1760,8 +2070,8 @@ class OutputParser:
                     else:
                         out += self._release(False)
                     continue
-                i = self.buf.find(THINK_END)
-                tool = self.buf.find(CALL_START) if self.schemas else -1
+                i = self.buf.find(self.think_end)
+                tool = self.buf.find(CALL_START) if self.schemas and not self.whole else -1
                 if tool >= 0 and (i < 0 or tool < i):
                     if tool:
                         out.append(Event("reasoning", self._track(self.buf[:tool])))
@@ -1773,12 +2083,13 @@ class OutputParser:
                         self.buf = self.buf[tool + len(CALL_START):]
                     continue
                 if i < 0:
-                    keep = self._hold(self.buf, (THINK_END, CALL_START) if self.schemas else (THINK_END,))
+                    keep = self._hold(self.buf, (self.think_end, CALL_START) if self.schemas and not self.whole
+                                      else (self.think_end,))
                     if len(self.buf) > keep:
                         out.append(Event("reasoning", self._track(self.buf[:len(self.buf) - keep])))
                         self.buf = self.buf[len(self.buf) - keep:]
                     return out
-                quoted = self._quoted_think_end(i)
+                quoted = self._quoted_think_end(i) if self.quotes_end else False
                 if quoted is None:                   # held like a partial tag until the character after it is here
                     if i:
                         out.append(Event("reasoning", self._track(self.buf[:i])))
@@ -1790,17 +2101,26 @@ class OutputParser:
                     continue
                 if i:
                     out.append(Event("reasoning", self._track(self.buf[:i])))
-                self.buf = self.buf[i + len(THINK_END):]
+                self.buf = self.buf[i + len(self.think_end):]
                 self.state, self.lead, self.after_think = "content", True, True
                 self._reset_track()                               # the answer's own text starts here
             elif self.state == "content":
+                if self.opening:                                # the model's own opening of its reasoning
+                    if self.buf.startswith(self.think_open):
+                        self.buf, self.state, self.opening = self.buf[len(self.think_open):], "reasoning", False
+                        continue
+                    if self.think_open.startswith(self.buf):
+                        return out
+                    self.opening = False
+                for tag in self.noise:
+                    self.buf = self.buf.replace(tag, "")
                 if self.lead:                                   # newlines right after </think> or a call
                     stripped = self.buf.lstrip("\n")
                     if not stripped:
                         self.buf = ""
                         return out
                     self.buf, self.lead = stripped, False
-                i = self.buf.find(CALL_START)
+                i = self.buf.find(self.call_start)
                 stray = self._stray_think_at() if self.after_think else -1
                 if stray >= 0 and (i < 0 or stray < i):
                     # #4077: the reasoning ended at a `</think>` the model wrote while thinking (quoting the format on a
@@ -1832,7 +2152,7 @@ class OutputParser:
                 if i < 0:
                     # Hold a partial tag AND the newlines before it: if a tool call follows, they are dropped,
                     # so emitting them early would make streamed and whole outputs differ.
-                    j = len(self.buf) - self._hold(self.buf, (CALL_START, THINK_END) if self.after_think else (CALL_START,))
+                    j = len(self.buf) - self._hold(self.buf, ((self.call_start, THINK_END) if self.after_think else (self.call_start,)) + self.noise)
                     if self.recover and self.schemas:            # a line that may be becoming a bare <function=
                         k = self.buf.rfind("\n") + 1
                         tail = self.buf[k:]
@@ -1844,6 +2164,12 @@ class OutputParser:
                         out.append(Event("content", self._track(self.buf[:j])))
                         self.buf = self.buf[j:]
                     return out
+                if self.whole:                                  # GLM's and Gemma's opener is a call where it stands
+                    if i and self.buf[:i].strip():
+                        out.append(Event("content", self._track(self.buf[:i].rstrip("\n"))))
+                    self.buf = self.buf[i + len(self.call_start):]
+                    self.state = "call"
+                    continue
                 # #1058: an opener inside a code fence or inline code is text (a quoted example), never a call.  The
                 # text before it decides, so streamed and whole outputs agree.  Mid-sentence openers still count.
                 snap = self._snap()
@@ -1944,6 +2270,30 @@ class OutputParser:
                     out.append(Event("tool_call", call=call))
                 self.buf = self.buf[i + len(CALL_END):]
                 self.state, self.lead = "content", call is not None
+            elif self.whole:
+                # the call is announced when its name is complete; its arguments follow whole when it ends
+                name_of, end_of, parse = self.whole
+                if self.stream_tools and self.scall is None:
+                    name = name_of(self.buf)
+                    if name is not None:
+                        self.scall = ToolCall(name=name, arguments={})
+                        out.append(Event("tool_start", call=self.scall))
+                i = end_of(self.buf)
+                if i < 0:
+                    return out
+                body = self.buf[:i]
+                self.buf = self.buf[i + len(self.call_stop):]
+                calls = parse(body, self.schemas.get(name_of(body + self.call_stop)))
+                calls = calls if isinstance(calls, list) else [calls]     # LFM2's block holds a list of calls
+                if not calls:                                             # nothing a call can be made of
+                    out.append(Event("content", self._track(self.call_start + body + self.call_stop)))
+                elif self.scall is not None:
+                    calls[0].id = self.scall.id
+                    out.append(Event("tool_args", json.dumps(calls[0].arguments, ensure_ascii=False),
+                                     call=self.scall))
+                out.extend(Event("tool_call", call=call) for call in calls)
+                self._reset_scan()
+                self.state, self.lead = "content", True
             else:
                 drop = None
                 if self.bare:                       # no wrapper: the call ends at its </function>; a stray
@@ -2041,12 +2391,12 @@ class OutputParser:
             self.buf = ""
             self._reset_scan()
             return out
-        if self.state == "reasoning" and self.buf == THINK_END:   # the output ends on a held `</think>`: its end
+        if self.state == "reasoning" and self.buf == self.think_end:   # the output ends on a held end: its end
             self.buf, self.state = "", "content"
         if self.buf:
             # an unfinished call inside the reasoning (#804) is reasoning text, never a call
             kind = {"reasoning": "reasoning", "rcall": "reasoning", "content": "content"}.get(self.state, "content")
-            text = CALL_START + self.buf if self.state in ("call", "json") and not self.bare else self.buf
+            text = self.call_start + self.buf if self.state in ("call", "json") and not self.bare else self.buf
             out.append(Event(kind, text))
             self.buf = ""
         return out

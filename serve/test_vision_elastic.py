@@ -135,6 +135,17 @@ class Elastic(unittest.TestCase):
         self.assertFalse(self.svc.vision_held)
         self.assertFalse(self.vision.up)
 
+    def test_an_encoder_on_the_cpu_starts_and_stops_without_vram(self):
+        self.vision.on_cpu = True
+        self.picture()
+        self.assertEqual(self.vision.starts, 1)
+        self.assertEqual(self.engine.calls, [])             # it takes no VRAM, so the cache is left as it is
+        self.assertFalse(self.svc.vision_held)
+        self.svc.last_image_at = 0
+        self.assertEqual(self.svc._vision_idle_down(), "down")
+        self.assertFalse(self.vision.up)
+        self.assertEqual(self.engine.calls, [])
+
     def test_the_config_keys(self):
         v = Vision({"exe": "e", "mmproj": "m", "model": "t", "elastic": True, "elastic_mib": 3000,
                     "elastic_idle_s": 30}, lazy=False)          # elastic: nothing starts with the server

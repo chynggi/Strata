@@ -137,7 +137,7 @@ def try_json(base, path, key="", timeout=20):
 
 def chat(base: str, key: str, messages: list, max_tokens: int, think: bool = False, tools=None, timeout: float = 3600) -> dict:
     """One streamed chat request -> {first, total, text, usage, timings, err}.  `first` is the seconds to the first
-    non-empty content or reasoning piece (keep-alives and empty deltas ignored)."""
+    non-empty content, reasoning or tool-call piece (keep-alives and empty deltas ignored)."""
     body = {"model": "strata", "stream": True, "max_tokens": max_tokens, "temperature": 0, "messages": messages}
     if tools:
         body["tools"] = tools
@@ -167,7 +167,8 @@ def chat(base: str, key: str, messages: list, max_tokens: int, think: bool = Fal
                 for ch in j.get("choices") or []:
                     dl = ch.get("delta") or {}
                     piece = (dl.get("content") or "") + (dl.get("reasoning_content") or "")
-                    if piece:
+                    # a turn can be a tool call alone (LFM2.5 calls one though the agent prompt asks it not to)
+                    if piece or dl.get("tool_calls"):
                         if first is None:
                             first = time.perf_counter() - t0
                         pieces += 1
@@ -554,6 +555,20 @@ def gpu_info_local() -> dict:
                     pass
             cards.append({"name": name, "vram_mib": vram, "driver": d})
         info["gpus"] = cards
+    if not info["gpus"] and os.name != "nt":
+        # ROCm from AMD's Python wheels (a container, setup's .venv) has no rocm-smi: the amdgpu driver's sysfs files
+        # name the cards the way the server reads them (the run was labelled "cpu" before)
+        try:
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            from serve.telemetry import _Amd
+            cards = []
+            while (card := _Amd(len(cards))).ok():
+                total = card.read().get("mem_total")
+                cards.append({"name": card.name(), "vram_mib": total >> 20 if total else None, "driver": None})
+            info["gpus"] = cards
+        except Exception:   # noqa: BLE001 - a report without the card's name is still a report
+            pass
     if not info["gpus"] and os.name == "nt":
         # #1587: Windows with only an AMD card has neither nvidia-smi nor rocm-smi; the display class in the registry
         # names the card, its VRAM and its driver (the run was labelled "CPU only" before)
@@ -1062,6 +1077,11 @@ def main(argv=None) -> int:
                 cfg_path = found[0]
                 if len(found) > 1:
                     say(f"Several models are installed; using {cfg_path.name} (the one used last). Pick another with --config FILE.")
+        if a.config and not cfg_path.is_file():          # a start script's name, or a typo
+            names = ", ".join(p.name for p in find_configs()) or "none"
+            print(f"{a.config}: no such run config. --config takes a model's strata-<model>.json; the ones here: "
+                  f"{names}", file=sys.stderr)
+            return 2
         if cfg_path is None or not cfg_path.is_file():
             print("No Strata model is set up in this folder: run START-HERE.bat (Windows) or ./setup.sh (Linux) first, "
                   "or give --url of a running server.", file=sys.stderr)

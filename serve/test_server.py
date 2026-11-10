@@ -78,7 +78,8 @@ class MaxTokens(unittest.TestCase):
         return s, b, prompt if u else None, u.get("output_tokens")
 
     def test_anthropic_thinks_only_when_asked(self):
-        # #278: Anthropic's thinking is opt-in; "thinking", an effort or a reasoning_budget_tokens (#123) asks for it
+        # #278: Anthropic's thinking is opt-in; "thinking" or a reasoning_budget_tokens (#123) asks for it, an effort
+        # alone does not
         from serve.frontend import anthropic_to_messages
         msgs = [{"role": "user", "content": "u"}]
         kw = lambda **r: anthropic_to_messages({"messages": msgs, **r}, think_unasked=False)[2]   # noqa: E731
@@ -87,7 +88,9 @@ class MaxTokens(unittest.TestCase):
         self.assertEqual(kw(), {"enable_thinking": False})
         self.assertEqual(kw(thinking={"type": "disabled"}), {"enable_thinking": False})
         self.assertNotIn("enable_thinking", kw(thinking={"type": "enabled", "budget_tokens": 2048}))
-        self.assertNotIn("enable_thinking", kw(output_config={"effort": "high"}))
+        self.assertEqual(kw(output_config={"effort": "high"}), {"enable_thinking": False})   # Claude Code's title
+        self.assertEqual(kw(thinking={"type": "adaptive"}, output_config={"effort": "medium"}),
+                         {"reasoning_effort": "medium"})
         self.assertNotIn("enable_thinking", kw(reasoning_budget_tokens=30))
 
     def test_count_tokens_is_the_prompt_messages_reads(self):
@@ -1595,6 +1598,32 @@ class ClientShapes(unittest.TestCase):
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
 
+    def test_tool_answers_keep_their_ids_and_go_in_call_order(self):
+        # a template may name a tool's answer by its call's id (the strata-poly models: use_template_ids), and a model
+        # reads answers by position
+        from serve import frontend
+        from serve.frontend import anthropic_to_messages, openai_to_messages
+        frontend.use_template_ids(True)
+        self.addCleanup(frontend.use_template_ids, False)
+        calls = [{"id": i, "type": "function", "function": {"name": "f", "arguments": "{}"}} for i in ("a", "b")]
+        answers = [{"role": "tool", "tool_call_id": i, "content": i.upper()} for i in ("b", "a")]
+        asked = [{"role": "user", "content": "u"}, {"role": "assistant", "content": "", "tool_calls": calls}]
+        got = openai_to_messages({"messages": asked + answers})[0]
+        self.assertEqual([c["id"] for c in got[1]["tool_calls"]], ["a", "b"])
+        self.assertEqual([(m["tool_call_id"], m["content"]) for m in got[2:]], [("a", "A"), ("b", "B")])
+        # an answer that names no call of the message before it, or two that name one call: left as they were sent
+        for loose in ([dict(answers[0], tool_call_id="x"), answers[1]], [answers[0], answers[0]],
+                      [{"role": "tool", "content": "B"}, answers[1]]):
+            got = openai_to_messages({"messages": asked + loose})[0]
+            self.assertEqual([m["content"] for m in got[2:]], [m["content"] for m in loose])
+        got = anthropic_to_messages({"messages": [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": i, "name": "f", "input": {}}
+                                              for i in ("a", "b")]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": i, "content": i.upper()}
+                                         for i in ("b", "a")]}]})[0]
+        self.assertEqual([(m["tool_call_id"], m["content"]) for m in got[2:]], [("a", "A"), ("b", "B")])
+
     def test_messages_sent_as_a_json_string(self):
         # #460: a client that double-encodes "messages" (and "tool_calls") as a JSON string gets them decoded; what is
         # still not a list of objects is a ValueError (the server's 400), not an AttributeError on m.get
@@ -1700,6 +1729,9 @@ class SamplingKeys(unittest.TestCase):
         for absent in ({}, {"strata_checkpoint": True}, {"strata_checkpoint": 0}, {"cache_prompt": False}):
             self.assertNotIn("ckpt=0", self.keys(**absent), absent)
 
+    def test_a_clients_turn_at_is_not_sent(self):
+        self.assertFalse([k for k in self.keys(turn_at=120) if k.startswith("turn_at=")])   # StrataEngine.turn_key
+
     def test_penalty_window(self):
         self.assertIn("penalty_last_n=64", self.keys(presence_penalty=1.5))
         self.assertIn("penalty_last_n=4096", self.keys(repetition_penalty=1.1, penalty_last_n=4096))
@@ -1775,6 +1807,152 @@ class SharedPrefix(unittest.TestCase):
         self.assertEqual(ids, self.svc.prepare(self.MSGS, None, {}, 16)[0])
 
 
+class SamplingEngine(MockEngine):
+    """Keeps every call's prompt, max_new and sampling (a warm read's too)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.calls = []
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        self.calls.append((list(ids), max_new, dict(sampling or {})))
+        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+
+class SlowWarmEngine(SamplingEngine):
+    """A warm read (one token) that takes up to 20 s unless it is stopped."""
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        t0 = time.monotonic()
+        while max_new == 1 and time.monotonic() - t0 < 20:
+            if cancel.is_set():
+                return
+            time.sleep(0.02)
+        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+
+def join_warm_read():
+    for t in threading.enumerate():
+        if t.name == "warm-start":
+            t.join(30)
+
+
+class LastTurn(unittest.TestCase):
+    """strata-poly keeps a checkpoint where the prompt's last turn begins (the GEN line's turn_at): the chat's next
+    request shares the prompt up to there, whatever its template writes for this reply (some drop the thinking)."""
+
+    MSGS = [{"role": "system", "content": "You are terse."}, {"role": "user", "content": "hi"}]
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.engine = StrataEngine("missing-executable", [], lazy=True)
+        self.engine.poly_engine = True                          # the key is strata-poly's; upstream's engines get none
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+
+    def test_upstream_engines_get_no_key(self):
+        ids = self.svc.encode_prompt(self.MSGS, None, {})
+        self.engine.poly_engine = False
+        self.assertEqual(self.engine.turn_key(ids), "")
+
+    def test_the_last_turn(self):
+        self.assertEqual(self.engine.turn_ids, {256})          # <|im_start|>, from the Service
+        ids = self.svc.encode_prompt(self.MSGS, None, {})
+        at = int(self.engine.turn_key(ids).split("=")[1])
+        self.assertTrue(self.tok.decode(ids[at:]).startswith("<|im_start|>assistant\n"))
+        reply = {"role": "assistant", "content": "ok", "reasoning_content": "Say hello."}
+        nxt = self.svc.encode_prompt(self.MSGS + [reply, {"role": "user", "content": "and?"}], None, {})
+        self.assertEqual(nxt[:at + 1], ids[:at + 1])
+
+    def test_no_turn(self):
+        self.assertEqual(self.engine.turn_key(self.tok.encode("plain text")), "")
+        ids = self.svc.encode_prompt(self.MSGS, None, {})
+        self.assertEqual(StrataEngine("missing-executable", [], lazy=True).turn_key(ids), "")   # no Service's tokens
+
+
+class WarmStart(unittest.TestCase):
+    """Opt-in "warm_start": the first turn of the last long prompt with tools (an agent's system prompt) is kept
+    next to the config and read when the server starts again; a request that comes meanwhile stops that read."""
+
+    TOOLS = ToolCallTerminators.SCHEMA
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = self.dir / "strata-m.warm-start"
+        self.tok = ByteTokenizer()
+        self.engine = SamplingEngine(self.tok, "ok", max_context=1 << 20)
+        self.svc = self.service(self.engine)
+
+    def service(self, engine):
+        svc = Service(engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.config_path = str(self.dir / "strata-m.json")
+        svc.warm_start = True
+        return svc
+
+    def prompt(self, system):
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": "hi"}]
+        return self.svc.encode_prompt(msgs, self.TOOLS, {})
+
+    def ask(self, ids, tools=TOOLS):
+        list(self.svc.run(ids, False, tools, 4, {}, threading.Event()))
+
+    def test_keeps_the_first_turn(self):
+        ids = self.prompt("S" * 3000)
+        self.ask(ids)
+        kept = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(ids[:len(kept)], kept)
+        self.assertTrue(self.tok.decode(ids[len(kept):]).startswith("<|im_start|>user\nhi"))
+        self.path.unlink()
+        self.ask(ids[:-1] + self.tok.encode("more"))            # the same start: not written again
+        self.assertFalse(self.path.exists())
+        ids = self.prompt("T" * 3000)
+        self.ask(ids)
+        new = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertNotEqual(new, kept)
+        self.assertEqual(ids[:len(new)], new)
+
+    def test_what_is_not_kept(self):
+        self.ask(self.prompt("S" * 100))                        # short
+        self.ask(self.prompt("S" * 3000), tools=None)           # no tools
+        self.svc.warm_start = False
+        self.ask(self.prompt("T" * 3000))                       # off
+        self.assertFalse(self.path.exists())
+
+    def test_a_new_server_reads_it(self):
+        self.ask(self.prompt("S" * 3000))
+        kept = json.loads(self.path.read_text(encoding="utf-8"))
+        svc = self.service(self.engine)
+        self.engine.calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            svc.start_warm()
+            join_warm_read()
+        self.assertEqual([(ids, n) for ids, n, _ in self.engine.calls], [(kept, 1)])
+        self.assertIn(f"read {len(kept)} tokens", out.getvalue())
+
+    def test_a_request_goes_first(self):
+        self.path.write_text(json.dumps(list(range(3000))), encoding="utf-8")
+        svc = self.service(SlowWarmEngine(self.tok, "ok", max_context=1 << 20))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            svc.start_warm()
+            t0 = time.monotonic()
+            list(svc.run(self.tok.encode("hi"), False, None, 4, {}, threading.Event()))
+            took = time.monotonic() - t0
+            join_warm_read()
+        self.assertLess(took, 5)
+        self.assertIn("stopped for a request", out.getvalue())
+
+    def test_files_that_are_not_a_kept_start(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.svc.start_warm()                               # none yet: nothing to say
+            self.assertEqual(out.getvalue(), "")
+            for bad in ("{", json.dumps({"tokens": [1] * 3000}), json.dumps([1, 2]), json.dumps([-1] * 3000),
+                        json.dumps(["1"] * 3000), json.dumps([True] * 3000)):
+                self.path.write_text(bad, encoding="utf-8")
+                self.svc.start_warm()
+        join_warm_read()
+        self.assertEqual(self.engine.calls, [])
+
+
 class GpuChoice(unittest.TestCase):
     """Issue #51: the config's \"gpu\" reaches the engine as CUDA_VISIBLE_DEVICES, numbered like nvidia-smi."""
 
@@ -1799,6 +1977,15 @@ class GpuChoice(unittest.TestCase):
         self.assertIn("CUDA0, CUDA1", line)
         for same in ({"gpu": 0, "args": []}, {"gpu": [0, 1], "args": [], "gpu_order": "as_given"}, {"args": []}, {"gpu": 1, "backend": "hip"}):
             self.assertIsNone(card_note(same, child_env(same)), same)       # the numbers agree, or no card was chosen, or AMD (its own numbering)
+
+    def test_gdn_mma_env_override(self):
+        """The existing model env map can opt out of a parent process's kernel request."""
+        from serve.server import child_env
+        with mock.patch.dict(os.environ, {"STRATA_GDN_MMA": "1"}):
+            self.assertEqual(child_env({})["STRATA_GDN_MMA"], "1")
+            self.assertEqual(child_env({"env": {"STRATA_GDN_MMA": 0}})["STRATA_GDN_MMA"], "0")
+            self.assertEqual(child_env({"env": {"STRATA_GDN_MMA": "1"}})["STRATA_GDN_MMA"], "1")
+            self.assertEqual(os.environ["STRATA_GDN_MMA"], "1")
 
     def test_card_order(self):
         """#1352: with an auto layer split the faster card (SMs x clock) goes last; ties, a manual split, a
@@ -2473,6 +2660,10 @@ class PeerDevice(unittest.TestCase):
         done = args + ["--vision", "--vram-reserve-mib", "700"]                  # setup wrote it: unchanged
         self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
         self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
+        # it has no such option; setup writes its path as this system writes one
+        for exe in ("engine-poly/strata-poly", os.path.join(os.sep, "x", "engine-poly", "strata-poly.exe")):
+            poly = ["--model", "x.gguf"]
+            self.assertEqual(engine_args({"exe": exe, "args": list(poly), "vision": {"exe": "v", "gpu": True}}), poly)
 
     def test_split_added_for_several_gpus(self):
         self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
@@ -3395,7 +3586,10 @@ class SharedSettings(unittest.TestCase):
         r = self.svc.with_shared({"messages": []}, "openai")
         self.assertEqual(r["reasoning_effort"], "low")
         self.assertEqual(self.svc.with_shared({"reasoning_effort": "high"}, "openai")["reasoning_effort"], "high")
-        self.assertEqual(self.svc.with_shared({}, "anthropic")["output_config"], {"effort": "low"})
+        r = self.svc.with_shared({"messages": [{"role": "user", "content": "u"}]}, "anthropic")
+        self.assertEqual(r["output_config"], {"effort": "low"})
+        from serve.frontend import anthropic_to_messages     # it thinks also under "anthropic_thinking": "on_request"
+        self.assertEqual(anthropic_to_messages(r, think_unasked=False)[2], {"reasoning_effort": "low"})
 
     def test_off_again(self):
         self.req("/settings", {"defaults": {"temperature": 0.3}})
@@ -4385,6 +4579,30 @@ class ThinkingBudget(unittest.TestCase):
                                                      "messages": [{"role": "user", "content": "2+2?"}]})
         self.assertEqual(len(self.engine.prompts), 3)              # thinking off: no budget, one prompt each
 
+    def test_a_reply_the_context_cut_short_gets_the_answer_room(self):
+        """Issue 16: no max_tokens and a nearly full context left Flint 416 tokens, which it thought through: the room
+        is the context's doing, not a small cap the client asked for, so the thinking is closed in time there too."""
+        self.engine.THOUGHT = "Let me think step by step about two plus two. " * 40    # 1,800 reasoning tokens
+        self.engine.max_context = 900
+        code, b = self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "2+2?"}]})
+        self.assertEqual(code, 200, b)
+        self.assertEqual(b["choices"][0]["message"]["content"], ThinkingEngine.ANSWER)
+        self.assertEqual(b["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(len(self.engine.prompts), 2)              # the wrap-up continuation
+
+    def test_a_context_too_full_for_the_wrap_up_says_so(self):
+        from serve.frontend import openai_to_messages
+        self.engine.THOUGHT = "Let me think step by step about two plus two. " * 40
+        prompt = self.svc.encode_prompt(*openai_to_messages({"messages": [{"role": "user", "content": "2+2?"}]}))
+        self.engine.max_context = len(prompt) + CTX_SLACK + 40      # 40 tokens left: the wrap-up alone takes more
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code, b = self.post("/v1/chat/completions", {"model": "m",
+                                                         "messages": [{"role": "user", "content": "2+2?"}]})
+        self.assertEqual((code, b["choices"][0]["finish_reason"]), (200, "length"), b)
+        self.assertIn("reached the end of the context while still thinking", out.getvalue())
+        self.assertIn("--max-context", out.getvalue())
+
     def test_anthropic_thinking_budget_tokens_is_a_budget(self):
         """0.1.45: thinking {type: enabled, budget_tokens: N} closes the thinking after N tokens (it was only a level)."""
         from serve.server import REASONING_WRAP_UP
@@ -5169,6 +5387,47 @@ class ModelAliases(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class ContainerLimits(unittest.TestCase):
+    """Inside a container the page shows what the container may use: a fake cgroup v2 folder with 25 CPUs and
+    120 GiB on a machine that reports more."""
+
+    def cgroup(self, d, cpu_max="2500000 100000", mem_max=str(120 << 30)):
+        for name, text in (("cpu.max", cpu_max), ("memory.max", mem_max), ("cpu.stat", "usage_usec 1000000\n"),
+                           ("memory.current", str(100 << 30)),
+                           ("memory.stat", f"anon {8 << 30}\ninactive_file {60 << 30}\nactive_file {30 << 30}\n")):
+            (Path(d) / name).write_text(text)
+        from serve import telemetry
+        return telemetry.Cgroup(d)
+
+    def test_quota_and_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.cgroup(d)
+            self.assertEqual((c.cpus, c.mem), (25.0, 120 << 30))
+            self.assertEqual(c.ram_used(), 10 << 30)        # without the file cache
+            (Path(d) / "cpu.stat").write_text("usage_usec 13500000\n")   # 12.5 CPU-seconds later
+            c.prev = (c.prev[0] - 1.0, c.prev[1])
+            self.assertAlmostEqual(c.cpu(), 50.0, delta=2.0)             # of the 25 CPUs, over about a second
+
+    def test_no_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.cgroup(d, cpu_max="max 100000", mem_max="max")
+            self.assertEqual((c.cpus, c.mem), (None, None))
+        from serve import telemetry
+        c = telemetry.Cgroup(os.path.join(tempfile.gettempdir(), "no-such-cgroup-folder"))
+        self.assertEqual((c.cpus, c.mem, c.cpu(), c.ram_used()), (None, None, None, None))
+
+    def test_the_page_gets_the_quota(self):
+        from serve import telemetry
+        with tempfile.TemporaryDirectory() as d:
+            c = self.cgroup(d)
+            with mock.patch.object(telemetry, "Cgroup", lambda: c), mock.patch("os.cpu_count", return_value=208):
+                t = telemetry.Telemetry()
+            self.assertEqual((t.static["threads"], t.static["cores"]), (25, None))
+            s = t.sample()
+            if s.get("ram_total"):                          # a machine with less RAM than the fake limit keeps its own
+                self.assertLessEqual(s["ram_total"], 120 << 30)
 
 
 class AmdTelemetry(unittest.TestCase):

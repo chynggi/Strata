@@ -413,6 +413,57 @@ class Install(FakeRoot):
         st, _ = self.call("strata_status", {"hardware": False})
         self.assertEqual([m["model"] for m in st["installed"]["models"]], ["q2_0"])
 
+    def test_glm_plan(self):
+        """GLM 5.3 Flash: its one size, no images, and the context it was measured with whatever the card."""
+        card = {**FAKE_HW["gpus"][0], "vram_gb": 31.5}
+        self.strata._hardware = lambda: {**FAKE_HW, "ram_gb": 128.0, "gpus": [card]}
+        res, err = self.call("strata_install", {"family": "glm"})
+        self.assertFalse(err, res)
+        p = res["plan"]
+        self.assertEqual((p["family"], p["model"], p["context"], p["images"]), ("glm", "3.0BIT", 32768, "no"))
+        self.assertIn("--family glm --model 3.0BIT --context 32768 --vision no", p["setup_command"])
+        self.assertNotIn("--experimental-speed-projection", p["setup_command"])
+        res, err = self.call("strata_install", {"family": "glm", "vision": "yes"})
+        self.assertTrue(err)
+        self.assertIn("images are not available", res["error"])
+
+    def test_a_family_with_sizes_of_its_own(self):
+        """Qwen3.6 (strata-poly), Ornith 1.5 and Gemma 4: three sizes each, two families' of the same names; a 32 GB PC with an
+        8 GB card."""
+        card = {**FAKE_HW["gpus"][0], "vram_gb": 8.0}
+        self.strata._hardware = lambda: {**FAKE_HW, "ram_gb": 32.0, "gpus": [card]}
+        res, err = self.call("strata_install", {"family": "gemma4"})
+        self.assertFalse(err, res)
+        p = res["plan"]
+        self.assertEqual((p["family"], p["model"], p["context"], p["download_gb"], p["ram"]),
+                         ("gemma4", "UD-Q3_K_M", 32768, 13.2, "fits"))
+        self.assertIn("--family gemma4 --model UD-Q3_K_M --context 32768 --vision yes", p["setup_command"])   # pictures on by default (owner rule 2026-10-18)
+        res, err = self.call("strata_install", {"model": "APEX-I-COMPACT"})
+        self.assertFalse(err, res)
+        self.assertEqual((res["plan"]["family"], res["plan"]["download_gb"]), ("ornith", 17.4))
+        res, err = self.call("strata_install", {"model": "UD-Q3_K_M"})
+        self.assertTrue(err)
+        self.assertIn("give family too (qwen36poly or gemma4)", res["error"])
+        res, err = self.call("strata_install", {"model": "UD-Q4_K_XL"})    # Unsloth's, as before Tiel had one
+        self.assertFalse(err, res)
+        self.assertEqual(res["plan"]["family"], "unsloth")
+        res, err = self.call("strata_install", {"family": "tiel"})
+        self.assertFalse(err, res)
+        self.assertEqual((res["plan"]["model"], res["plan"]["download_gb"], res["plan"]["ram"]),
+                         ("UD-Q3_K_XL", 17.2, "fits"))
+        res, err = self.call("strata_install", {"family": "qwen", "model": "UD-Q3_K_M"})
+        self.assertTrue(err)
+        self.assertIn("Qwen3.8-Flash-Next has no UD-Q3_K_M", res["error"])
+        res, err = self.call("strata_models", {})
+        self.assertFalse(err, res)
+        by = {f["family"]: f["sizes"] for f in res["families"]}
+        self.assertEqual([(x["model"], x["download_gb"], x["on_this_pc"], x["id"]) for x in by["qwen36poly"]],
+                         [("UD-Q3_K_M", 17.1, "fits", "qwen36p-ud-q3_k_m"),
+                          ("UD-Q2_K_XL", 12.6, "fits", "qwen36p-ud-q2_k_xl"),
+                          ("UD-Q4_K_M", 22.7, "fits", "qwen36p-ud-q4_k_m")])
+        self.assertEqual((by["gemma4"][0]["download_gb"], by["gemma4"][0]["images"]), (13.2, True))
+        self.assertFalse(next(f for f in res["families"] if f["family"] == "glm")["images"])   # GLM reads none
+
     def test_progress_while_running_and_cancel(self):
         (self.root / "slow").write_text("")
         res, err = self.call("strata_install", {"family": "coder", "confirm": True})
@@ -597,6 +648,15 @@ class Helpers(unittest.TestCase):
         self.assertEqual(list(S.FAMILIES), list(M.FALLBACK_FAMILIES))
         for f, d in S.FAMILIES.items():
             self.assertEqual(d["tag"], M.FALLBACK_FAMILIES[f]["tag"])
+            if d.get("engine") != "poly":               # the PolyStrata families' table also carries these
+                continue
+            self.assertEqual((d.get("vision"), d["about"]), (M.FALLBACK_FAMILIES[f].get("vision"),
+                                                              M.FALLBACK_FAMILIES[f]["about"]), f)
+            own = M.FALLBACK_FAMILIES[f].get("models", {})
+            self.assertEqual(list(d.get("models", {})), list(own), f)
+            for m, size in d.get("models", {}).items():
+                for k in ("about", "download_gb", "ram_gb", "arena_gb"):
+                    self.assertEqual(size[k], own[m][k], f"{f} {m} {k}")
         self.assertEqual(list(S.CONTEXTS), M.FALLBACK_CONTEXTS)
 
     def test_unsloth_sizes(self):
@@ -1011,6 +1071,9 @@ class MixedGraphics(unittest.TestCase):
             self.assertFalse(by["AMD Radeon(TM) Graphics"]["usable"])
             rec = s.recommend({**hw, "ram_gb": 64.0})
             self.assertEqual((rec["backend"], rec["gpu"]["name"]), ("hip", "AMD Radeon RX 9070 XT"))
+
+
+TablesMatch = Helpers
 
 
 if __name__ == "__main__":

@@ -524,7 +524,7 @@ class IQ4XS(Base):
         fam_line = next(ln for ln in out.splitlines() if ln.startswith(f"  {n}) "))
         self.assertIn("Qwen3.8-Flash-Next (Unsloth)", fam_line)
         self.assertIn("UD-IQ1_M, UD-Q2_0, UD-IQ2_XS, UD-Q2_K_XL, UD-IQ3_XXS, UD-Q3_K_XL, UD-IQ4_XS, UD-IQ4_XS-v31, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL or Q8_0 (68 to 188 GB downloads)", fam_line)
-        self.assertNotIn("[experimental]", out)
+        self.assertNotIn("[experimental]", fam_line)   # (GLM 5.3 Flash's line has it)
         size_lines = [ln for ln in out.splitlines()
                       if any(ln.startswith(f"  {i}) {m} ") for i in range(1, 6) for m in setup.MODELS)]
         self.assertEqual(len(size_lines), 5, out)
@@ -561,13 +561,18 @@ class IQ4XS(Base):
         self.assertNotIn("EXPERIMENTAL", next(ln for ln in out.splitlines() if ln.strip().startswith(M)))
 
     def test_check_below_every_floor(self):
-        # #977: 16 GB fits no size; the RAM line is not [ok] and the verdict says so
-        code, out, _ = self.main(["--check"], ram=16.0, m=X)
+        # #977: 4 GB fits no size; the RAM line is not [ok] and the verdict says so
+        code, out, _ = self.main(["--check"], ram=4.0, m=X)
         self.assertEqual(code, 1, out)
         self.assertNotIn("[ok] RAM", out)
-        self.assertIn("[!]  RAM: 16 GB (less than", out)
+        self.assertIn("[!]  RAM: 4 GB (less than", out)
         self.assertIn("This PC cannot run Strata yet", out)
         self.assertNotIn("This PC can run Strata", out)
+        # 16 GB fits no size of Qwen3.8-Flash-Next, and it fits sizes of the smaller models
+        code, out, _ = self.main(["--check"], ram=16.0, m=X)
+        self.assertEqual(code, 0, out)
+        self.assertIn("[!]  RAM: 16 GB (less than", out)
+        self.assertIn("This PC can run Strata", out)
 
     def test_engine_0138(self):
         code, out, cfg = self.main(["--context", "8192"], version="0.1.37", m=X)

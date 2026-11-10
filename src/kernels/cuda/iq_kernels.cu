@@ -10,10 +10,12 @@
 #include "strata/core/sm75_series.hpp"
 #include "strata/core/sm120_series.hpp"
 #include "strata/core/dispatch_stats.hpp"
+#include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
 #include "s26_tsum.cuh"
+#include "slots.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -5377,6 +5379,41 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
         default: std::fprintf(stderr, "iq_mmvq: type %d is not supported\n", t); std::exit(1);
     }
     check("iq_mmvq");
+}
+
+namespace {
+// mmvq_kernel for one column, with the matrix, its column and its output taken from blockIdx.y's slot.
+template<int TY, typename S>
+__global__ void __launch_bounds__(128) mmvq_slots_kernel(S slots, size_t row_bytes, int n_in, int n_out) {
+    const int row = blockIdx.x * 4 + threadIdx.y;
+    if (row >= n_out) return;
+    const int lane = threadIdx.x;
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    const uint8_t* wr = (const uint8_t*) at.w + (size_t) row * row_bytes;
+    const float s = row_dot<TY>(wr, (const block_q8_1*) at.x, n_in / Fmt<TY>::qk, lane);
+    if (lane == 0) at.y[row] = s;
+}
+
+template<typename S>
+void slots_of(int t, const S& slots, int count, int n_in, int n_out, void* stream) {
+    const size_t rb = iq_row_bytes(t, n_in);
+    const dim3 grid((unsigned) ((n_out + 3) / 4), (unsigned) count), block(32, 4);
+    switch (t) {
+#define STRATA_MMVQ(T) case T: mmvq_slots_kernel<T, S><<<grid, block, 0, (cudaStream_t) stream>>>(slots, rb, n_in, n_out); break;
+        STRATA_MMVQ_FMTS(STRATA_MMVQ)
+#undef STRATA_MMVQ
+        default: std::fprintf(stderr, "iq_mmvq_slots: type %d is not supported\n", t); std::exit(1);
+    }
+    check("iq_mmvq_slots");
+}
+}  // namespace
+
+void iq_mmvq_slots(int t, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+    slots_of(t, slots, count, n_in, n_out, stream);
+}
+
+void iq_mmvq_ids(int t, const MmvqIds& ids, int count, int n_in, int n_out, void* stream) {
+    slots_of(t, ids, count, n_in, n_out, stream);
 }
 
 void iq_dequant_f16(int t, const void* src, int64_t n, uint16_t* dst, void* stream, const float* scale) {

@@ -28,14 +28,16 @@ td.log
 # created by setup.py on the user's machine (one per OS in a dual-boot shared folder: .venv/ + .venv-linux/)
 /.venv*/
 /build/
-/third_party/llama.cpp
+/third_party/llama.cpp*
 /models/
 /packs/
 /mtp/
 /run-*.bat
 /run-*.sh
 /strata-*.json
+/strata-*.json.bak
 /strata-*.log
+/strata-*.warm-start
 /build-strata.bat
 /build-strata-cuda12.bat
 /build-cuda12/
@@ -49,6 +51,11 @@ build-vision-cuda12.bat
 # setup.py outputs (engine, downloads) and release builds (engine/ + engine-linux/ in a dual-boot shared folder)
 /engine*/
 /engine-cuda12/
+/engine-poly/
+/build-strata-poly.bat
+/build-vision-poly.bat
+/engine-glm/
+/build-strata-glm.bat
 /build-release*/
 /dist/
 *.done

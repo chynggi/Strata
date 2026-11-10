@@ -56,6 +56,8 @@ class HuggingFacePins(unittest.TestCase):
             if fam.get("ready"):                       # ready-made packs: pinned per file (test_ready_packs_pinned)
                 continue
             for key in ("hf", "mmproj_hf"):
+                if key == "mmproj_hf" and "mmproj" not in fam:   # GLM 5.3 Flash: no image encoder
+                    continue
                 with self.subTest(family=name, key=key):
                     self.assertRegex(fam[key], SHA)
                     self.assertNotIn("/resolve/main/", fam[key])

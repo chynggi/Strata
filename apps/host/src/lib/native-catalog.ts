@@ -17,12 +17,16 @@ export const versionNote=(model:string)=>{const nv=nvfp4Version(model);return nv
 /** The fork's uncensored families (setup.py FAMILIES orca / mrad / rvn, docs/FORK.md): Flash-Next GGUFs whose titles do not say so. */
 export const FORK_FAMILIES=['orca','mrad','rvn'];
 const FORK_EDITIONS:Record<string,string>={orca:'Uncensored (OrcaRouter)',mrad:'Uncensored (mradermacher)',rvn:'Uncensored (RVN)'};
+/** The fork's models on the strata-poly engine (setup.py FAMILIES with "engine": "poly", from PolyStrata, docs/BACKENDS.md): each its own group, never
+ * folded into Qwen3.6 by a "35B-A3B" title (Ornith, Tiel, Clover, MiniCPM-V are other weights). */
+export const POLY_FAMILIES=['glm','lfm25','flint','qwen36poly','clover','ornith','ornith122','gemma4','tiel','minicpmv','kolibri'];
 /** Display groups are distinct from the engine's installation family IDs. */
 export function nativeCatalogModels(families:NativeFamily[]):CatalogModel[]{
  if(!families.length)return[];
  const groups:CatalogModel[]=[{family:'qwen3.8',title:'Qwen3.8-Flash-Next',about:'',experimental:false,images:false,sizes:[]},{family:'qwen3.6',title:'Qwen3.6-35B-A3B',about:'',experimental:false,images:false,sizes:[]}];
  for(const family of families){
   if(family.family==='deepseek41'){const sizes=family.sizes.filter(size=>!/^UD-Q8/i.test(size.model));if(sizes.length)groups.push({family:'deepseek41',title:family.title||'DeepSeek-V4.1-Flash',about:family.about??'',experimental:false,images:sizes.some(size=>size.images!==false),sizes:sizes.map(size=>({...size,sourceFamily:family.family,edition:'',images:size.images!==false}))});continue;}
+  if(POLY_FAMILIES.includes(family.family)){if(family.sizes.length)groups.push({family:family.family,title:family.title,about:family.about??'',experimental:true,images:family.images,sizes:family.sizes.map(size=>({...size,sourceFamily:family.family,edition:'',images:size.images!==false}))});continue;}
   const target=/qwen3[._-]?6|35b[-_]?a3b/i.test(family.title+' '+family.family)?groups[1]:['qwen','swift','coder','unsloth','gyro',...FORK_FAMILIES].includes(family.family)||/qwen3[._-]?8|flash.next/i.test(family.title)?groups[0]:undefined;
   if(!target)continue;
   const edition=target===groups[0]?({swift:'Swift 1.5',coder:'Coder',unsloth:'Unsloth',gyro:'Gyro',...FORK_EDITIONS} as Record<string,string>)[family.family]??'':'';

@@ -33,6 +33,7 @@
 #include "strata/core/dispatch_stats.hpp"
 #include "strata/core/defaults_026.hpp"
 #include "s26_tsum.cuh"
+#include "slots.cuh"
 #if !defined(__HIPCC__)
 #include "q8_1_il.cuh"
 #endif
@@ -101,6 +102,11 @@ struct Q6KBlock {
     int8_t scales[16];
     half d;
 };
+struct Q2KBlock {
+    uint8_t scales[16];
+    uint8_t qs[64];
+    half2 dm;
+};
 struct Q40Block {
     half d;
     uint8_t qs[16];
@@ -118,6 +124,11 @@ struct IQ4NLBlock {
     half d;
     uint8_t qs[16];
 };
+// MXFP4: a byte of exponent, then 32 four-bit codes.  No alignment: a run of them has blocks at every byte.
+struct MXFP4Block {
+    uint8_t e;
+    uint8_t qs[16];
+};
 static_assert(sizeof(Q5KBlock) == 176 && alignof(Q5KBlock) == 4);
 static_assert(sizeof(Q81Block) == 36 && alignof(Q81Block) == 4);
 static_assert(sizeof(Q20Block) == 18 && alignof(Q20Block) == 2 && offsetof(Q20Block, qs) == 2);
@@ -133,11 +144,14 @@ static_assert(sizeof(Q4KBlock) == 144 && alignof(Q4KBlock) == 4 &&
 static_assert(sizeof(Q6KBlock) == 210 && alignof(Q6KBlock) == 2 &&
               offsetof(Q6KBlock, qh) == 128 && offsetof(Q6KBlock, scales) == 192 &&
               offsetof(Q6KBlock, d) == 208);
+static_assert(sizeof(Q2KBlock) == 84 && alignof(Q2KBlock) == 4 &&
+              offsetof(Q2KBlock, qs) == 16 && offsetof(Q2KBlock, dm) == 80);
 static_assert(sizeof(Q40Block) == 18 && alignof(Q40Block) == 2 && offsetof(Q40Block, qs) == 2);
 static_assert(sizeof(Q50Block) == 22 && alignof(Q50Block) == 2 &&
               offsetof(Q50Block, qh) == 2 && offsetof(Q50Block, qs) == 6);
 static_assert(sizeof(Q80Block) == 34 && alignof(Q80Block) == 2 && offsetof(Q80Block, qs) == 2);
 static_assert(sizeof(IQ4NLBlock) == 18 && alignof(IQ4NLBlock) == 2 && offsetof(IQ4NLBlock, qs) == 2);
+static_assert(sizeof(MXFP4Block) == 17 && alignof(MXFP4Block) == 1 && offsetof(MXFP4Block, qs) == 1);
 
 __device__ __forceinline__ float warp_sum(float x) {
 #pragma unroll
@@ -186,6 +200,46 @@ __global__ void native_swiglu_quantize_q8_1_kernel(const float* __restrict__ gat
     const int8_t q = q8_1_quant(xi, d, amax);
     y[i / Q8K].qs[i % Q8K] = q;
     if (i % Q8K == 0) y[i / Q8K].ds = q8_1_ds(d, sum);
+}
+
+// native_add_rms_norm_q8_1: a block a row.  The sum of squares, the scale and the product are poly's rms_norm_kernel
+// with its block size (SUM threads of the block) and its IEEE operations written out (this file is built with
+// --use_fast_math).  Then every thread of the block takes values, a warp 32 of one Q8_1 block, and quantizes them as
+// native_quantize_q8_1_kernel does: more threads than the sum's make the row's quantization fewer steps.
+template<int SUM>
+__launch_bounds__(1024, 1)
+__global__ void native_add_rms_norm_q8_1_kernel(float* __restrict__ x, const float* __restrict__ add,
+                                                const float* __restrict__ w, float* __restrict__ y,
+                                                Q81Block* __restrict__ yq, int n, float eps) {
+    __shared__ float part[SUM / WARP];
+    float* xr = x + std::size_t(blockIdx.x) * n;
+    const float* ar = add ? add + std::size_t(blockIdx.x) * n : nullptr;
+    float* yr = y + std::size_t(blockIdx.x) * n;
+    Q81Block* qr = yq + std::size_t(blockIdx.x) * (n / Q8K);
+    if (threadIdx.x < SUM) {
+        float ss = 0.0f;
+        for (int i = threadIdx.x; i < n; i += SUM) {
+            float v = xr[i];
+            if (ar) xr[i] = v = __fadd_rn(v, ar[i]);
+            ss = __fmaf_rn(v, v, ss);
+        }
+        ss = warp_sum(ss);
+        if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = ss;
+    }
+    __syncthreads();
+    float sum = 0.0f;
+    for (int k = 0; k < SUM / WARP; ++k) sum = __fadd_rn(sum, part[k]);
+    const float scale = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(sum, float(n)), eps)));
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {   // n is a multiple of 32: a warp's 32 values are one block
+        const float xi = __fmul_rn(__fmul_rn(xr[i], scale), w[i]);
+        yr[i] = xi;
+        const float amax = warp_max(fabsf(xi));
+        const float bsum = warp_sum(xi);
+        const float d = q8_1_finite(amax / 127.0f);
+        const int8_t q = q8_1_quant(xi, d, amax);
+        qr[i / Q8K].qs[i % Q8K] = q;
+        if (i % Q8K == 0) qr[i / Q8K].ds = q8_1_ds(d, bsum);
+    }
 }
 
 // Exact pinned vec_dot_q5_K_q8_1_impl_vmmq expression and integer dot order.
@@ -447,16 +501,83 @@ __global__ void native_q3_k_mmvq_kernel(const Q3KBlock* __restrict__ w,
     }
 }
 
+// Q2_K: llama.cpp's vec_dot_q2_K_q8_1 in its mmvq form, same float accumulation order.
+__device__ __forceinline__ float q2k_q8_dot(const Q2KBlock* __restrict__ w,
+                                           const Q81Block* __restrict__ x, int iqs) {
+    const int bq8_offset = 4 * (iqs / 8);
+    const uint8_t* scales = w->scales + (iqs - iqs % 8 + (iqs % 8) / 4);
+    const int v = reinterpret_cast<const int*>(w->qs)[iqs];
+    float sumf_d = 0.0f;
+    float sumf_m = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int u = reinterpret_cast<const int*>(x[bq8_offset + i].qs)[iqs % 8];
+        const float d8 = __low2float(x[bq8_offset + i].ds);
+        const int sc = scales[2 * i];
+        const int vi = (v >> (2 * i)) & 0x03030303;
+        sumf_d += d8 * (STRATA_DP4A(vi, u, 0) * (sc & 0xF));
+        int m = sc >> 4;
+        m |= m << 8;
+        m |= m << 16;
+        sumf_m += d8 * STRATA_DP4A(m, u, 0);
+    }
+    const float2 dm = __half22float2(w->dm);
+    return dm.x * sumf_d - dm.y * sumf_m;
+}
+
+// Q2_K generic MMVQ: QK=256, QI=16, VDR=1, eight blocks per iteration, as Q3_K.
+template<bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_q2_k_mmvq_kernel(const Q2KBlock* __restrict__ w,
+                                        const Q81Block* __restrict__ x,
+                                        float* __restrict__ y, int n_in, int n_out) {
+    constexpr int ROWS = SmallK ? WARPS : 1;
+    constexpr int BLOCKS_PER_ITER = WARPS * WARP / 16;
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / 256;
+    float tmp[ROWS] = {};
+    for (int kbx = tid / 16; kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
+        const int kby = kbx * 8;
+        const int kqs = tid % 16;
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                tmp[i] += q2k_q8_dot(w + block, x + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        tmp[i] = warp_sum(tmp[i]);
+        if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
+    }
+}
+
 // The pinned nonlinear IQ4 codebook and its CUDA two-stage byte lookup. The
 // explicit alignment satisfies the four 32-bit table loads; values are unchanged.
 __device__ __align__(4) int8_t iq4nl_values[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
 };
 
-__device__ __forceinline__ int2 iq4_table_lookup(int q4) {
+// MXFP4's codes are E2M1 values doubled, so a block's scale is its power of two halved: llama.cpp's kvalues_mxfp4.
+__device__ __align__(4) int8_t mxfp4_values[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
+// Eight four-bit codes of q4 looked up in a codebook of 16: the even nibbles' values in .x, the odd ones' in .y.
+__device__ __forceinline__ int2 table16_lookup(const int8_t* table, int q4) {
 #if defined(STRATA_HIP_GFX906)
     // AMD: llama.cpp's HIP lookup (see iq_kernels.cu get_int_from_table_16): 4 v_perm_b32 per 8 values
-    const uint32_t* v32 = reinterpret_cast<const uint32_t*>(iq4nl_values);
+    const uint32_t* v32 = reinterpret_cast<const uint32_t*>(table);
     const uint32_t q_even = (uint32_t) q4, q_odd = (uint32_t) q4 >> 4;
     const uint32_t el = __builtin_amdgcn_perm(v32[1], v32[0], q_even & 0x07070707u);
     const uint32_t ol = __builtin_amdgcn_perm(v32[1], v32[0], q_odd & 0x07070707u);
@@ -465,7 +586,7 @@ __device__ __forceinline__ int2 iq4_table_lookup(int q4) {
     return make_int2((int) __builtin_amdgcn_perm(eh, el, 0x03020100u | ((q_even & 0x08080808u) >> 1)),
                      (int) __builtin_amdgcn_perm(oh, ol, 0x03020100u | ((q_odd & 0x08080808u) >> 1)));
 #else
-    const uint32_t* table32 = reinterpret_cast<const uint32_t*>(iq4nl_values);
+    const uint32_t* table32 = reinterpret_cast<const uint32_t*>(table);
     uint32_t tmp[2];
     const uint32_t low_high_selection_indices = 0x32103210 | ((q4 & 0x88888888) >> 1);
 #pragma unroll
@@ -477,6 +598,19 @@ __device__ __forceinline__ int2 iq4_table_lookup(int q4) {
     }
     return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
 #endif
+}
+
+__device__ __forceinline__ int2 iq4_table_lookup(int q4) { return table16_lookup(iq4nl_values, q4); }
+
+// Four bytes from any byte address, little-endian, as llama.cpp's get_int_b1.
+__device__ __forceinline__ int load_int_b1(const void* ptr, int i32) {
+    const auto* x = static_cast<const uint8_t*>(ptr);
+    return x[4 * i32] | x[4 * i32 + 1] << 8 | x[4 * i32 + 2] << 16 | x[4 * i32 + 3] << 24;
+}
+
+// A block's power of two, halved, as llama.cpp's ggml_cuda_e8m0_to_fp32(e) * 0.5f.
+__device__ __forceinline__ float mxfp4_scale(uint8_t e) {
+    return __uint_as_float(e == 0 ? 0x00400000u : (uint32_t) e << 23) * 0.5f;
 }
 
 // Exact pinned vec_dot_iq4_xs_q8_1: a lane consumes one 32-element subblock,
@@ -842,7 +976,22 @@ __device__ __forceinline__ float small_q8_dot(const IQ4NLBlock* __restrict__ w,
     return d * sumi;
 }
 
-// QI=4 for Q4_0/Q5_0/IQ4_NL and QI=8 for Q8_0. With VDR=2 this preserves
+// llama.cpp's vec_dot_mxfp4_q8_1 with VDR 2.
+__device__ __forceinline__ float small_q8_dot(const MXFP4Block* __restrict__ w,
+                                             const Q81Block* __restrict__ x, int iqs) {
+    const int* q8 = reinterpret_cast<const int*>(x->qs) + iqs;
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const int2 v = table16_lookup(mxfp4_values, load_int_b1(w->qs, iqs + i));
+        sumi = STRATA_DP4A(v.x, q8[i], sumi);
+        sumi = STRATA_DP4A(v.y, q8[i + 4], sumi);
+    }
+    const float d = mxfp4_scale(w->e) * __low2float(x->ds);
+    return d * sumi;
+}
+
+// QI=4 for Q4_0/Q5_0/IQ4_NL/MXFP4 and QI=8 for Q8_0. With VDR=2 this preserves
 // the pinned 64/32-block iteration and 2048/1024-element small-K thresholds.
 template<typename Weight, int Qi, bool SmallK>
 __launch_bounds__(WARPS * WARP, 1)
@@ -1096,6 +1245,16 @@ struct IQ4XSTraits {
         return d * sumi;
     }
 };
+// Q2_K keeps the block pointer: `apply` is the q2k_q8_dot of native_q2_k_mmvq_kernel, which has no multi-column
+// form, so the launch of several matrices (native_mmvq_slots) gives that kernel's bits.
+struct Q2KTraits {
+    using Block = Q2KBlock;
+    static constexpr int DIV = 256, T = 16, KBY = 8, BPI = WARPS * WARP / 16;
+    __device__ static int kqs(int tid) { return tid % 16; }
+    struct W { const Block* w; };
+    __device__ static W load(const Block* __restrict__ w, int) { return W{w}; }
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) { return q2k_q8_dot(r.w, x, iqs); }
+};
 // The four 32-element formats: `load` decodes the two 32-bit weight chunks and block scale once per (row, block),
 // and `apply` runs the exact same STRATA_DP4A and scale arithmetic per activation column as `small_q8_dot`.
 template<typename Weight, int Qi>
@@ -1207,6 +1366,32 @@ struct SmallTraits<IQ4NLBlock, 4> {
 #pragma unroll
         for (int i = 0; i < 2; ++i) r.v[i] = iq4_table_lookup(load_int_b2(w->qs, iqs + i));
         r.dw = __half2float(w->d);
+        return r;
+    }
+    __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) {
+        const int* q8 = reinterpret_cast<const int*>(x->qs) + iqs;
+        int sumi = 0;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            sumi = STRATA_DP4A(r.v[i].x, q8[i], sumi);
+            sumi = STRATA_DP4A(r.v[i].y, q8[i + 4], sumi);
+        }
+        const float d = r.dw * __low2float(x->ds);
+        return d * sumi;
+    }
+};
+
+template<>
+struct SmallTraits<MXFP4Block, 4> {
+    using Block = MXFP4Block;
+    static constexpr int DIV = 32, T = 2, KBY = 1, BPI = 2 * WARPS * WARP / 4;
+    __device__ static int kqs(int tid) { return 2 * (tid % 2); }
+    struct W { int2 v[2]; float dw; };
+    __device__ static W load(const Block* __restrict__ w, int iqs) {
+        W r;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) r.v[i] = table16_lookup(mxfp4_values, load_int_b1(w->qs, iqs + i));
+        r.dw = mxfp4_scale(w->e);
         return r;
     }
     __device__ static float apply(const W& r, const Q81Block* __restrict__ x, int iqs) {
@@ -1601,6 +1786,120 @@ void launch_multi(const void* weights, const void* x_q8_1, float* y, int n_in, i
 #endif
 #endif
         default: throw std::invalid_argument("native MMVQ multi-column launch requires 2 <= ncols <= MAX_NCOLS");
+    }
+}
+
+// Several matrices of one format and shape in one launch (native_mmvq_slots, native_mmvq_ids): blockIdx.y is the
+// matrix, and the rest is native_mmvq_multi_kernel for one column in its EXACT layout.
+template<typename F, int ROWS, typename S>
+__launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 1))
+__global__ void native_mmvq_slots_kernel(S slots, int n_in, int n_out) {
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    const auto* w = static_cast<const typename F::Block*>(at.w);
+    const auto* x = static_cast<const Q81Block*>(at.x);
+    float* y = at.y;
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / F::DIV;
+    float tmp[ROWS] = {};
+    for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += F::BPI) {
+        const int kby = kbx * F::KBY;
+        const int kqs = F::kqs(tid);
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                tmp[i] += F::apply(F::load(w + block, kqs), x + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        tmp[i] = warp_sum(tmp[i]);
+        if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i];
+    }
+}
+
+// native_mmvq_slots_kernel when a row's blocks all fall to the first warp's lanes (blocks_per_row * T <= WARP, e.g. an
+// expert's IQ4_XS down projection of 512 values: 2 blocks, 16 lanes): there the other warps only add zeros, so each
+// warp takes rows of its own instead - the same lanes' terms, the same three zero partials and the same warp_sum,
+// bit for bit, with a quarter of the blocks and no shared memory or barrier.  Qwen3.6 UD-Q3_K_M on an RX 7800 XT:
+// the down products were 32% of a decode's GPU time at ~75 GB/s.  Taken where native_mmvq_slots_wide() says so.
+template<typename F, int ROWS, typename S, int G = 1>
+__launch_bounds__(WARPS * WARP)
+__global__ void native_mmvq_slots_warp_kernel(S slots, int n_in, int n_out) {
+    // G row groups a warp, WARP / G lanes each (G = 2 when a row needs 16 lanes or fewer: the IQ4_XS down projection's
+    // 512 values are 16): the full warp_sum's steps between the groups added the zeros of the lanes that had none of
+    // the row, so a group adds those zeros and sums its own lanes - the same bits again
+    constexpr int L = WARP / G;
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    const auto* w = static_cast<const typename F::Block*>(at.w);
+    const auto* x = static_cast<const Q81Block*>(at.x);
+    float* y = at.y;
+    const int lane = int(threadIdx.x), grp = lane / L, local = lane - grp * L;
+    const int warp_row0 = ROWS * (int(blockIdx.x) * WARPS + int(threadIdx.y)) * G;
+    if (warp_row0 >= n_out) return;   // whole warps: no barrier below
+    const int row0 = warp_row0 + ROWS * grp;
+    const int blocks_per_row = n_in / F::DIV;
+    float tmp[ROWS] = {};
+    if (row0 < n_out) {
+        for (int kbx = local / F::T; kbx < blocks_per_row; kbx += F::BPI) {
+            const int kby = kbx * F::KBY;
+            const int kqs = F::kqs(local);
+#pragma unroll
+            for (int i = 0; i < ROWS; ++i) {
+                if (row0 + i < n_out) {
+                    const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                    tmp[i] += F::apply(F::load(w + block, kqs), x + kby, kqs);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += 0.0f;   // the block kernel's partials of the other warps
+        if constexpr (G == 1) {
+            tmp[i] = warp_sum(tmp[i]);
+        } else {
+#pragma unroll
+            for (int offset = WARP / 2; offset >= L; offset >>= 1) tmp[i] += 0.0f;   // the other group's lanes: zeros
+#pragma unroll
+            for (int offset = L / 2; offset > 0; offset >>= 1) tmp[i] += __shfl_xor_sync(0xffffffff, tmp[i], offset, WARP);
+        }
+        if (local == i && row0 + i < n_out) y[row0 + i] = tmp[i];
+    }
+}
+
+template<typename F, typename S>
+void launch_slots(const S& slots, int count, int n_in, int n_out, cudaStream_t s) {
+    const dim3 threads(WARP, WARPS);
+    if (native_mmvq_slots_wide() && n_in / F::DIV * F::T <= WARP && n_in % F::DIV == 0) {
+        constexpr int ROWS = 2;
+        if (n_in / F::DIV * F::T <= WARP / 2) {   // a row in half a warp: two rows' groups a warp
+            const dim3 blocks(unsigned((std::size_t(n_out) + 2 * ROWS * WARPS - 1) / (2 * ROWS * WARPS)), unsigned(count));
+            native_mmvq_slots_warp_kernel<F, ROWS, S, 2><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+        } else {
+            const dim3 blocks(unsigned((std::size_t(n_out) + ROWS * WARPS - 1) / (ROWS * WARPS)), unsigned(count));
+            native_mmvq_slots_warp_kernel<F, ROWS, S, 1><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+        }
+        return;
+    }
+    if (n_in / F::DIV < F::BPI) {
+        constexpr int ROWS = 2;
+        const dim3 blocks(unsigned((std::size_t(n_out) + ROWS - 1) / ROWS), unsigned(count));
+        native_mmvq_slots_kernel<F, ROWS, S><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
+    } else {
+        native_mmvq_slots_kernel<F, 1, S><<<dim3(unsigned(n_out), unsigned(count)), threads, 0, s>>>(slots, n_in, n_out);
     }
 }
 
@@ -3084,7 +3383,9 @@ std::size_t native_q8_1_bytes(int n_in, int ncols) {
 }
 
 void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols, void* stream) {
-    validate_shape(n_in, ncols);
+    // one flat vector whatever ncols is (below): up to kMmvqSlotsMax columns, a slots launch's activations
+    validate_shape(n_in, 1);
+    if (ncols < 1 || ncols > kMmvqSlotsMax) throw std::invalid_argument("native_quantize_q8_1 requires 1 <= ncols <= 32");
     validate_pointer(x);
     validate_pointer(x_q8_1);
     validate_stream(stream);
@@ -3109,6 +3410,28 @@ void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_
     native_swiglu_quantize_q8_1_kernel<<<blocks, QUANT_THREADS, 0,
                                          static_cast<cudaStream_t>(stream)>>>(
         gate, up, static_cast<Q81Block*>(x_q8_1), n_total);
+    launch_check();
+}
+
+void native_add_rms_norm_q8_1(float* x, const float* add, const float* w, float* y, void* y_q8_1, int n, int rows,
+                              float eps, int threads, void* stream) {
+    validate_shape(n, 1);
+    validate_pointer(x);
+    validate_pointer(w);
+    validate_pointer(y);
+    validate_pointer(y_q8_1);
+    validate_stream(stream);
+    if (rows < 1) return;
+    const auto s = static_cast<cudaStream_t>(stream);
+    auto* q = static_cast<Q81Block*>(y_q8_1);
+    const int block = std::max(threads, std::min(1024, n));   // n is a multiple of 32, and so is this
+    switch (threads) {
+    case 128: native_add_rms_norm_q8_1_kernel<128><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    case 256: native_add_rms_norm_q8_1_kernel<256><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    case 512: native_add_rms_norm_q8_1_kernel<512><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    case 1024: native_add_rms_norm_q8_1_kernel<1024><<<rows, block, 0, s>>>(x, add, w, y, q, n, eps); break;
+    default: throw std::invalid_argument("native_add_rms_norm_q8_1: 128, 256, 512 or 1024 threads");
+    }
     launch_check();
 }
 
@@ -3318,6 +3641,31 @@ void native_q3_k_f32(const void* weights, const float* x, void* scratch_q8_1,
     native_q3_k_mmvq(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
+// Q2_K has no multi-column kernel yet: each column is its own single-column launch.
+void native_q2_k_mmvq(const void* weights, const void* x_q8_1, float* y,
+                      int n_in, int n_out, int ncols, void* stream) {
+    validate_shape(n_in, ncols, 256);
+    if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
+    validate_pointer(weights);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    const auto* w = static_cast<const Q2KBlock*>(weights);
+    const auto s = static_cast<cudaStream_t>(stream);
+    const dim3 threads(WARP, WARPS);
+    for (int j = 0; j < ncols; ++j) {
+        const auto* x = static_cast<const Q81Block*>(x_q8_1) + std::size_t(j) * (n_in / Q8K);
+        float* yj = y + std::size_t(j) * n_out;
+        if (n_in / 256 < WARPS * WARP / 16) {
+            const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
+            native_q2_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, yj, n_in, n_out);
+        } else {
+            native_q2_k_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, yj, n_in, n_out);
+        }
+    }
+    launch_check();
+}
+
 void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
     validate_shape(n_in, ncols, 256);
@@ -3518,10 +3866,10 @@ void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
 }
 
 bool native_mmvq_supported(int ggml_type) noexcept {
-    return ggml_type == 2 || ggml_type == 6 || ggml_type == 7 || ggml_type == 8 || ggml_type == 11 ||
+    return ggml_type == 2 || ggml_type == 6 || ggml_type == 7 || ggml_type == 8 || ggml_type == 10 || ggml_type == 11 ||
            ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 20 ||
            ggml_type == 23 || ggml_type == 42 || ggml_type == 16 || ggml_type == 17 || ggml_type == 18 ||
-           ggml_type == 21 || ggml_type == 22 || ggml_type == 29;
+           ggml_type == 21 || ggml_type == 22 || ggml_type == 29 || ggml_type == 39;
 }
 
 std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out) {
@@ -3532,6 +3880,8 @@ std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out) {
     case 7: block_elems = 32; block_bytes = 24; break;
     case 8: block_elems = 32; block_bytes = 34; break;
     case 20: block_elems = 32; block_bytes = 18; break;
+    case 39: block_elems = 32; block_bytes = 17; break;
+    case 10: block_elems = 256; block_bytes = 84; break;
     case 11: block_elems = 256; block_bytes = 110; break;
     case 12: block_elems = 256; block_bytes = 144; break;
     case 13: block_elems = 256; block_bytes = 176; break;
@@ -3573,6 +3923,8 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
     case 7: iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 8: native_q8_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 20: native_iq4_nl_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
+    case 39: small_mmvq<MXFP4Block, 4>(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
+    case 10: native_q2_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 11: native_q3_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 12: native_q4_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 13: native_q5_k_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
@@ -3583,6 +3935,91 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
         iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     default: throw std::invalid_argument("unsupported native MMVQ GGML type");
     }
+}
+
+namespace {
+
+// The formats a slots launch has a kernel for: 1 this file's, 2 iq_kernels.cu's, 0 none.
+int slots_kind(int ggml_type) {
+#if defined(STRATA_HIP_GFX906)
+    (void) ggml_type;
+    return 0;   // the wave layout has no kernel for it
+#else
+    switch (ggml_type) {
+    case 2: case 6: case 8: case 20: case 39: case 10: case 11: case 12: case 13: case 14: case 23: case 42: return 1;
+    case 7: case 16: case 17: case 18: case 21: case 22: case 29: return 2;   // the ones native_mmvq() hands to iq_mmvq()
+    default: return 0;
+    }
+#endif
+}
+
+template<typename S>
+void launch_slots_of(int ggml_type, const S& slots, int count, int n_in, int n_out, void* stream) {
+    const bool small = ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 20 || ggml_type == 39;
+    validate_shape(n_in, 1, small || ggml_type == 7 ? 32 : ggml_type == 42 ? 64 : 256);
+    validate_stream(stream);
+    if (slots_kind(ggml_type) == 2) {
+        if constexpr (std::is_same_v<S, MmvqSlots>) iq_mmvq_slots(ggml_type, slots, count, n_in, n_out, stream);
+        else iq_mmvq_ids(ggml_type, slots, count, n_in, n_out, stream);
+        return;
+    }
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ggml_type) {
+    case 2: launch_slots<SmallTraits<Q40Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 6: launch_slots<SmallTraits<Q50Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 8: launch_slots<SmallTraits<Q80Block, 8>>(slots, count, n_in, n_out, s); break;
+    case 20: launch_slots<SmallTraits<IQ4NLBlock, 4>>(slots, count, n_in, n_out, s); break;
+    case 39: launch_slots<SmallTraits<MXFP4Block, 4>>(slots, count, n_in, n_out, s); break;
+    case 10: launch_slots<Q2KTraits>(slots, count, n_in, n_out, s); break;
+    case 11: launch_slots<Q3KTraits>(slots, count, n_in, n_out, s); break;
+    case 12: launch_slots<Q4KTraits>(slots, count, n_in, n_out, s); break;
+    case 13: launch_slots<Q5KTraits>(slots, count, n_in, n_out, s); break;
+    case 14: launch_slots<Q6KTraits>(slots, count, n_in, n_out, s); break;
+    case 23: launch_slots<IQ4XSTraits>(slots, count, n_in, n_out, s); break;
+    default: launch_slots<Q20Traits>(slots, count, n_in, n_out, s); break;
+    }
+    launch_check();
+}
+
+}  // namespace
+
+bool native_mmvq_slots_wide() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_SLOTS_WARP");
+#if defined(__HIPCC__)
+        return v == nullptr || v[0] != '0';
+#else
+        return v != nullptr && v[0] == '1';
+#endif
+    }();
+    return on;
+}
+
+bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream) {
+    if (!slots_kind(ggml_type)) return false;
+    if (n_out <= 0 || count < 1 || count > kMmvqSlotsMax)
+        throw std::invalid_argument("native MMVQ requires n_out > 0 and 1 to 32 matrices");
+    for (int i = 0; i < count; ++i) {
+        validate_pointer(slots.w[i]);
+        validate_pointer(slots.x[i]);
+        validate_pointer(slots.y[i]);
+    }
+    launch_slots_of(ggml_type, slots, count, n_in, n_out, stream);
+    return true;
+}
+
+bool native_mmvq_ids_supported(int ggml_type) { return slots_kind(ggml_type) != 0; }
+
+bool native_mmvq_ids(int ggml_type, const MmvqIds& ids, int count, int n_in, int n_out, void* stream) {
+    if (!slots_kind(ggml_type)) return false;
+    if (n_out <= 0 || count < 1 || count > 65535 || ids.x_every < 1)
+        throw std::invalid_argument("native_mmvq_ids requires n_out > 0, 1 to 65535 matrices and x_every > 0");
+    validate_pointer(ids.table);
+    validate_pointer(ids.ids);
+    validate_pointer(ids.x);
+    validate_pointer(ids.y);
+    launch_slots_of(ggml_type, ids, count, n_in, n_out, stream);
+    return true;
 }
 
 #if !defined(__HIPCC__)

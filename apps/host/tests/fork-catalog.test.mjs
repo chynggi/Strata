@@ -17,3 +17,17 @@ test('their short names and their group',()=>{
  assert.equal(nativeShortName('rvn-iq3_xs'),'RVN IQ3_XS');
  assert.deepEqual(VERSION_GROUPS.find(g=>g.id==='uncensored').families,['orca','mrad','rvn']);
 });
+test('the strata-poly families are groups of their own, never folded into Qwen3.6 by a 35B-A3B title',()=>{
+ const models=nativeCatalogModels([family('qwen','Qwen3.8-Flash-Next',['Q2_0']),family('qwen36','Qwen3.6-35B-A3B',['UD-Q4_K_XL']),
+  family('tiel','Tiel Coder 35B-A3B',['UD-Q3_K_XL']),family('qwen36poly','Qwen3.6-35B-A3B',['UD-Q3_K_M']),family('glm','GLM 5.3 Flash',['3.0BIT'])]);
+ assert.deepEqual(models.map(m=>[m.family,m.sizes.map(s=>s.sourceFamily+'/'+s.model)]),[['qwen3.8',['qwen/Q2_0']],['qwen3.6',['qwen36/UD-Q4_K_XL']],
+  ['tiel',['tiel/UD-Q3_K_XL']],['qwen36poly',['qwen36poly/UD-Q3_K_M']],['glm',['glm/3.0BIT']]]);
+ assert.ok(models.slice(2).every(m=>m.experimental));
+});
+test('their short names',()=>{
+ assert.equal(nativeShortName('glm-3.0bit'),'GLM 5.3 Flash 3.0BIT');
+ assert.equal(nativeShortName('ornith122-ud-q4_k_xl'),'Ornith 1.5 122B UD-Q4_K_XL');
+ assert.equal(nativeShortName('ornith-apex-i-mini'),'Ornith 1.5 APEX-I-MINI');
+ assert.equal(nativeShortName('qwen36p-ud-q3_k_m'),'Qwen3.6 (strata-poly) UD-Q3_K_M');
+ assert.equal(nativeShortName('qwen36-ud-q4_k_xl'),'Qwen3.6 UD-Q4_K_XL');
+});

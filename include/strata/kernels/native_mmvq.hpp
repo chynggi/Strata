@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace strata::kernels {
 
@@ -44,6 +45,13 @@ int native_mmvq_b6_rows();
 void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols,
                           void* stream);
 
+/// An RMS norm of `rows` rows of n values and native_quantize_q8_1() of its output in one launch, bit for bit what
+/// the two launches give: y = x / rms(x) * w as poly's rms_norm() writes it with `threads` a block (its
+/// sum_threads(n)), and y_q8_1 its Q8_1 blocks.  With `add` (null: none), x += add first, as axpy() adds, and x
+/// keeps the sum.  n is a multiple of 32.
+void native_add_rms_norm_q8_1(float* x, const float* add, const float* w, float* y, void* y_q8_1, int n, int rows,
+                              float eps, int threads, void* stream);
+
 void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_1,
                                  int n_in, int ncols, void* stream);
 
@@ -59,6 +67,9 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
 
 void native_q2_0_f32(const void* weights, const float* x, void* scratch_q8_1,
                      float* y, int n_in, int n_out, int ncols, void* stream);
+
+void native_q2_k_mmvq(const void* weights, const void* x_q8_1, float* y,
+                      int n_in, int n_out, int ncols, void* stream);
 
 void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream);
@@ -138,9 +149,42 @@ void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream);
 
+// Up to kMmvqSlotsMax (32) matrices of one format and shape in one launch: matrix i times its own Q8_1 column x[i]
+// into y[i], as native_mmvq(type, w[i], x[i], y[i], n_in, n_out, 1, stream) would each.  A launch costs the calling thread more
+// than a small product costs the card, which is what this saves.  False, with nothing launched: there is no
+// kernel for it (a format native_mmvq() does not take, or a HIP build), and the caller launches them one by one.
+constexpr int kMmvqSlotsMax = 32;   // 8 before: strata-poly's cached experts go 32 a launch where the wide path is on
+struct MmvqSlots {
+    const void* w[kMmvqSlotsMax];
+    const void* x[kMmvqSlotsMax];
+    float* y[kMmvqSlotsMax];
+};
+bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
+// Whether the slots launches take a warp per row group where a row's blocks fit one warp (an expert's IQ4_XS down
+// projection of 512 values), and strata-poly gives them its cached experts 32 at a time instead of 8.  The same bits
+// either way.  On by default on HIP (measured on an RX 7800 XT), off by default on CUDA (not measured there);
+// STRATA_SLOTS_WARP=0 turns it off, =1 on.
+bool native_mmvq_slots_wide();
+// native_mmvq_slots with the matrices the card picked, so that the launch needs nothing of the host (a decode
+// step's routed experts when every one of them is in VRAM): matrix j is table[ids[j]] + offset bytes, times the
+// Q8_1 column x + (j / x_every) * x_stride bytes, into y + j * y_stride floats.  count may pass 8.  False, with
+// nothing launched: there is no kernel for the format (native_mmvq_ids_supported() says so beforehand).
+struct MmvqIds {
+    const void* const* table;
+    const int32_t* ids;
+    std::size_t offset;
+    const void* x;
+    std::size_t x_stride;
+    int x_every;
+    float* y;
+    std::size_t y_stride;
+};
+bool native_mmvq_ids_supported(int ggml_type);
+bool native_mmvq_ids(int ggml_type, const MmvqIds& ids, int count, int n_in, int n_out, void* stream);
+
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
-// dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q3_K=11, Q4_K=12, Q5_K=13,
-// Q6_K=14, IQ4_NL=20, IQ4_XS=23, Q2_0=42. Unsupported IDs throw in the byte-count
+// dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13,
+// Q6_K=14, IQ4_NL=20, IQ4_XS=23, MXFP4=39, Q2_0=42. Unsupported IDs throw in the byte-count
 // and launch helpers; only the
 // capability query returns false.
 bool native_mmvq_supported(int ggml_type) noexcept;
