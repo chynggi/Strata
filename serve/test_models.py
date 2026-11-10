@@ -574,8 +574,10 @@ class Start(unittest.TestCase):
     """main() with --engine strata as far as "ready": 0.1.42's line for the replicas' cards read `groups`, a name of
     start_model()'s, and every start of a real engine ended in a NameError."""
 
-    def start(self, keys=None, argv=()):
-        """main() for a run config with `keys`, stopped at once (Ctrl+C): (its output, the Service it served)."""
+    def start(self, keys=None, argv=(), merges_json=None, made=None):
+        """main() for a run config with `keys`, stopped at once (Ctrl+C): (its output, the Service it served).
+        `merges_json`: the pack has merges.json (a strata-poly pack) instead of merges.txt.  `made`: a list the
+        tokenizer's arguments go to."""
         real_sleep = time.sleep
 
         def sleep(s):                       # Ctrl+C in main()'s wait, real sleeps in the server's threads
@@ -592,7 +594,10 @@ class Start(unittest.TestCase):
             cfg = install(Path(d), "alpha", "qwen35moe", "a.gguf")
             cfg.write_text(json.dumps({**json.loads(cfg.read_text()), **(keys or {})}))
             # upstream's main() reads the pack's tokenizer files itself and starts the engine with start_engine_or_fallback
-            (Path(d) / "alpha-tok" / "merges.txt").write_text("")
+            if merges_json is None:
+                (Path(d) / "alpha-tok" / "merges.txt").write_text("")
+            else:
+                (Path(d) / "alpha-tok" / "merges.json").write_text(json.dumps(merges_json))
             (Path(d) / "alpha-tok" / "token_type.json").write_text("[]")
             tok = ByteTokenizer()
             out = io.StringIO()
@@ -604,7 +609,7 @@ class Start(unittest.TestCase):
                 return engine
             with mock.patch.object(sys, "argv", ["server.py", "--engine", "strata", "--config", str(cfg), "--port", "0",
                                                  *argv]), \
-                    mock.patch.object(ST, "Tokenizer", lambda *a, **k: tok), \
+                    mock.patch.object(ST, "Tokenizer", lambda *a, **k: (made if made is not None else []).append(a) or tok), \
                     mock.patch.object(S, "start_engine_or_fallback", started), \
                     mock.patch.object(S, "serve", serve_it), \
                     mock.patch.object(S.time, "sleep", sleep), mock.patch.object(S.signal, "signal"), \
@@ -615,6 +620,16 @@ class Start(unittest.TestCase):
     def test_main_reaches_ready(self):
         out, _ = self.start()
         self.assertIn("ready: http://127.0.0.1:", out)
+
+    def test_a_pack_with_merges_json_is_read(self):
+        """Gemma 4's merges hold spaces, so its strata-poly pack has merges.json; main() read merges.txt only."""
+        made = []
+        out, _ = self.start(merges_json=["a b", "▁ ▁"], made=made)
+        self.assertIn("ready: http://127.0.0.1:", out)
+        self.assertEqual(made[0][1], ["a b", "▁ ▁"])
+        made.clear()
+        self.start(made=made)                                   # upstream's packs: merges.txt, as before
+        self.assertEqual(made[0][1], [""])
 
     def test_the_config_settings_are_as_before(self):
         """#37 moved the model's settings into model_settings(): main() sets what it set before (0.1.44.1-poly.6)."""

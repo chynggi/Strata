@@ -10975,7 +10975,9 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         tokens = [None] * len(vocab)
         for t, i in vocab.items():
             tokens[i] = t
-        merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
+        # merges.json: a strata-poly pack whose merges hold spaces or newlines (Gemma 4's); upstream's packs have merges.txt
+        merges = json.loads((tpath / "merges.json").read_text(encoding="utf-8")) if (tpath / "merges.json").exists() \
+            else (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
         try:                                            # the pack's pre-tokenizer name and special ids (DeepSeek's differ)
             tcfg = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8"))
