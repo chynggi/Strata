@@ -756,6 +756,8 @@ class Tuner:
         after an idle gap, the order). A value must beat the default by the margin AND beat the control by the margin in every
         round. A win here is only a candidate: the tuner confirms it afterwards in a fresh engine. One value per key can win."""
         points: list[tuple[str, Any]] = []
+        if self.ctx.family == "poly":                    # strata-poly reads none of these request keys (no --spec-min-p, --pcie-frac, --aux-cpus)
+            return []
         for spec in tune_knobs.PER_REQUEST:
             if self.ctx.backend not in spec["backends"]:
                 continue
@@ -885,11 +887,14 @@ def context_from_config(cfg: dict[str, Any], *, engine_backend: str | None, opts
             arch = archs[0] if archs else None
         except Exception:  # noqa: BLE001
             arch = None
+    if family is None and tune_knobs.poly_engine(cfg):
+        family = "poly"
     return tune_knobs.Context(
         backend=backend, family=family or detect_family(args), gpu_count=max(1, len(used)),
         vram_mib=min((g["vram_total_mib"] for g in used if g.get("vram_total_mib")), default=0),
         ram_gib=int((mem.get("total_mib") or 0) // 1024), model_gib=model_gib_of(args),
-        hybrid_cpu=bool(cpu.get("hybrid")), logical_threads=int(cpu.get("logical") or 0), arch=arch,
+        hybrid_cpu=bool(cpu.get("hybrid")), logical_threads=int(cpu.get("logical") or 0),
+        physical_threads=int(cpu.get("physical") or 0), arch=arch,
         context_tokens=ctx_tokens, goal=opts.goal, use=opts.use, allow_placement=opts.allow_placement,
         allow_nonrepeatable=opts.allow_nonrepeatable, engine_flags=engine_flags, base_args=args)
 

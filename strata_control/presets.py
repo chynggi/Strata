@@ -113,7 +113,7 @@ def choices_from_config(cfg: dict[str, Any], *, use: str = "chat") -> dict[str, 
         "goal": "room" if room else "speed",
         "reserve_mib": int(reserve) if isinstance(reserve, (int, float)) else 0,
         "use": use,
-        "family": "qwen36" if (val("--mtp") or "").isdigit() else "flash-next",
+        "family": "poly" if tune_knobs.poly_engine(cfg) else "qwen36" if (val("--mtp") or "").isdigit() else "flash-next",
     }
 
 

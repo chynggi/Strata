@@ -98,7 +98,7 @@ strata launch --show-key
 | `--mtp on\|off` | The draft layer. `off` saves about 1 GB of graphics memory and is slower. Default: on. |
 | `--drafting auto\|mtp\|dflash2\|off` | Which drafter guesses ahead. `dflash2` is for Qwen3.8-Flash-Next only and downloads a 1.2 GB drafter once. If it cannot run, MTP is used and the start says why. |
 | `--gpu LIST`, `--gpu-roles LIST` | Which cards to use, and a role per card. |
-| `--tune quick\|thorough\|skip`, `--tune-allow-small`, `--retune` | Tuning. `--retune` measures again; a model tuned before for the same choices on this computer reuses the stored result. |
+| `--tune quick\|thorough\|skip`, `--tune-allow-small`, `--retune` | Tuning. `--retune` measures again; a model tuned before for the same choices on this computer reuses the stored result. A strata-poly model (Gemma 4, GLM, ...; a saved preset too) is tuned with that engine's own settings: one CPU thread per core, which gave the same answers; with `--tune-allow-small` also how many experts move into graphics memory while it answers (`--expert-swaps` 32 or 128) and a shorter guess window (`--window 4`). |
 | `--set KEY=VALUE` | An advanced engine setting or `STRATA_*` variable (repeatable). Unknown names get a warning. |
 | `--pool-cores LIST` | Experimental: pin CPU workers to these logical processors, for example `2-14:2` ([DETAILS.md](DETAILS.md)). |
 | `--access local\|lan\|cloudflare\|tailscale`, `--port N` | Who can reach the server. |

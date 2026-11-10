@@ -40,9 +40,16 @@ ANSWER_NOTICE_UNSTEADY = {
 }
 
 
+def poly_engine(cfg: dict[str, Any]) -> bool:
+    """The run config starts strata-poly (the engine of the models this fork adds), as serve/server.py's poly_engine reads it."""
+    import os
+    return os.path.splitext(os.path.basename(str(cfg.get("exe") or "").replace("\\", "/")))[0].lower() in ("strata-poly", "strata-glm")
+
+
 def default_unsteady(ctx: "Context") -> bool:
-    """True where the setup default is itself not repeatable: the low-RAM resident mode (adaptive tier and draft timing) and SYCL."""
-    return ctx.backend == "sycl" or condition_holds("resident_ram", ctx)
+    """True where the setup default is itself not repeatable: the low-RAM resident mode (adaptive tier and draft timing) and SYCL;
+    and strata-poly, whose expert cache changes while it answers and whose expert profile is written back after each run."""
+    return ctx.backend == "sycl" or condition_holds("resident_ram", ctx) or ctx.family == "poly"
 
 
 #: Flags that take no value (present = on, absent = off).
@@ -123,6 +130,18 @@ ARMS: tuple[Arm, ...] = (
         dynamic={"--pool-workers": "workers-1"}, needs=("hybrid_cpu",), deep_only=True),
     Arm("kv_grow", "Allocate the conversation memory as it grows", "exact", {"--kv-grow": True},
         classes=("B", "C"), backends=("cuda", "hip", "sycl"), deep_only=True),
+    # --- strata-poly (the engine of the models this fork adds: Gemma 4, GLM, ...), class P. Answer classes from greedy runs of
+    # Dark-Craving 26B-A4B IQ4_XS on an RTX 3060 12 GB / i5-10400 (STRATA_FREEZE_EXPERTS=1, --window 1, the expert profile put back
+    # before each run, a 3000-token prompt, 48 tokens): --threads 6 gave the same top-3 ids and probabilities at every step as
+    # the default 12; --window 4 and 8 did not. --expert-swaps moves experts between the card and the CPU while answering.
+    Arm("poly_threads_physical", "One CPU thread per core for the experts outside graphics memory", "exact", {},
+        families=("poly",), backends=("cuda",), classes=("P",), dynamic={"--threads": "physical_cores"}, needs=("smt",)),
+    Arm("poly_expert_swaps_128", "Move more of the experts in use into graphics memory while answering", "placement",
+        {"--expert-swaps": 128}, families=("poly",), backends=("cuda",), classes=("P",)),
+    Arm("poly_expert_swaps_32", "Move fewer experts while answering", "placement",
+        {"--expert-swaps": 32}, families=("poly",), backends=("cuda",), classes=("P",)),
+    Arm("poly_window_4", "Shorter guess window (4 tokens)", "placement",
+        {"--window": 4}, families=("poly",), backends=("cuda",), classes=("P",)),
 )
 
 #: The per-request settings (3.1, 4.1). They need no restart, so every one is tried before any restart (5).
@@ -197,13 +216,14 @@ class Context:
     """The machine and the choices a candidate plan is made for."""
 
     backend: str = "cuda"                 # cuda | hip | sycl | metal | cpu
-    family: str = "flash-next"            # flash-next | qwen36
+    family: str = "flash-next"            # flash-next | qwen36 | poly (strata-poly)
     gpu_count: int = 1
     vram_mib: int = 0                     # the card the model runs on (smallest if several)
     ram_gib: int = 0
     model_gib: float = 0.0
     hybrid_cpu: bool = False
     logical_threads: int = 0
+    physical_threads: int = 0             # CPU cores (strata-poly's --threads arm)
     arch: str | None = None               # e.g. gfx1201
     context_tokens: int = 32768
     goal: str = "speed"                   # speed | room
@@ -232,12 +252,15 @@ def condition_holds(name: str, ctx: Context) -> bool:
         "ram_bound": bool(ctx.ram_gib and ctx.model_gib and ctx.ram_gib - ctx.model_gib < 30),
         "ctx_ge_128k": ctx.context_tokens >= 98304,
         "long_prompts": ctx.context_tokens >= 65536 or ctx.use == "coding",
+        "smt": 0 < ctx.physical_threads < ctx.logical_threads,
     }.get(name, False)
 
 
 def machine_classes(ctx: Context) -> list[str]:
     """The classes of 6.2 this machine belongs to, in the order their candidate lists are walked."""
     classes: list[str] = []
+    if ctx.family == "poly":
+        return ["P"]
     if ctx.family == "qwen36":
         classes.append("D" if ctx.facts.get("hybrid_experts") else "E")
         return classes
@@ -385,6 +408,8 @@ def allowed(answer: str, ctx: Context) -> bool:
 def dynamic_value(spec: str, ctx: Context) -> Any:
     f = ctx.facts
     workers = f.get("workers")
+    if spec == "physical_cores":
+        return ctx.physical_threads or None
     if spec == "workers":
         return int(workers) if workers else None
     if spec.startswith("workers-") and workers:

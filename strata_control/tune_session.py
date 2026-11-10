@@ -18,6 +18,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import socket
 import statistics
 import subprocess
@@ -461,6 +462,26 @@ class WorkerSession:
     def system(self) -> dict[str, Any]:
         return {"memory": tune_machine.memory(), "gpus": tune_machine.gpus(), "cpu": tune_machine.cpu()}
 
+    def _own_expert_profile(self, args: list[str], n: int) -> list[str]:
+        """strata-poly writes its --expert-profile back after each run, so the next one would load another split of the experts
+        between the card and the CPU: each run gets a copy of the file as it was when the tuning began (and the person's own file
+        is not changed by the measuring). Other engines' arguments are returned as they are."""
+        from strata_control import tune_knobs
+        if not tune_knobs.poly_engine(self.base) or "--expert-profile" not in args:
+            return args
+        i = args.index("--expert-profile")
+        if i + 1 >= len(args):
+            return args
+        start = self.workdir / "expert-profile.start.txt"
+        if not start.exists():
+            try:
+                shutil.copyfile(args[i + 1], start)
+            except OSError:                          # no profile yet: the engine makes one, as it would
+                return args
+        run_copy = self.workdir / f"expert-profile-{n}.txt"
+        shutil.copyfile(start, run_copy)
+        return args[:i + 1] + [str(run_copy)] + args[i + 2:]
+
     @contextlib.contextmanager
     def engine(self, args: list[str], env: dict[str, str | None], pre_start: Callable[[], None] | None = None) -> Iterator[WorkerEngine]:
         with contextlib.ExitStack() as stack:
@@ -471,7 +492,7 @@ class WorkerSession:
             self.runs += 1
             n = self.runs
             cfg = json.loads(json.dumps(self.base))
-            cfg["args"] = list(args)
+            cfg["args"] = self._own_expert_profile(list(args), n)
             cenv = dict(cfg.get("env") or {})
             for k, v in env.items():
                 if v is None:
