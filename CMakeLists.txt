@@ -9,6 +9,11 @@
 # and is wrong about its own performance, which is the worst of both outcomes.
 cmake_minimum_required(VERSION 3.24)
 project(strata VERSION 0.1.58 LANGUAGES CXX)
+# MSVC on a non-UTF-8 code page (949 on a Korean Windows) warns C4819 for every non-ASCII byte in CUDA's own headers:
+# over 12,000 lines in one strata-poly build.  /wd4819 only silences that warning (the code compiles as before, unlike
+# /utf-8); it reaches ggml too, and the .cu files through -Xcompiler.
+add_compile_options($<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CXX_COMPILER_ID:MSVC>>:/wd4819>
+                    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4819>)
 # EXPERIMENTAL: the Intel Arc engine, the SYCL port in sycl/ (PR #423; icpx + oneMKL, docs/INTEL_ARC.md). It is its
 # own project that takes the unported sources from src/; with this on, nothing below is configured.
 option(STRATA_ENABLE_SYCL "EXPERIMENTAL: build the Intel Arc (SYCL) engine from sycl/ - docs/INTEL_ARC.md" OFF)
