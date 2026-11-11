@@ -207,9 +207,10 @@ class LaunchApp(App):
     # Textual's own ctrl+c only shows a "Do you want to quit?" note, and Escape pressed next also went Back (B13): ctrl+c quits like ctrl+q and q
     BINDINGS = [Binding("ctrl+c", "quit", "Quit", show=False, priority=True)]
 
-    def __init__(self, ctx: Ctx, *, auto_run: bool = False) -> None:
+    def __init__(self, ctx: Ctx, *, auto_run: bool = False, start_at: str | None = None) -> None:
         super().__init__()
         self.ctx = ctx
+        self.start_at = start_at
         self.history: list[str] = []
         self.result: Result | None = None
         self.stopped_after_save = False
@@ -230,8 +231,20 @@ class LaunchApp(App):
     def on_mount(self) -> None:
         if self.auto_run:
             self.run_launch()
+        elif self.start_at:
+            self.begin_at(self.start_at)
         else:
             self.push_screen(StartScreen())
+
+    def begin_at(self, step_id: str) -> None:
+        """Open the screens at `step_id` with the settings the command line gave (`strata launch --customize`): the model's own steps
+        before it are skipped, as they are answered already. Back (Esc) still goes to the steps before it."""
+        self.ctx.tune_chosen = False
+        self.ctx.fresh_setup = True
+        self.ctx.picked_in_list = False
+        self.ctx.invalidate_rows()
+        flow = self.flow()
+        self.goto(step_id if step_id in flow else flow[0])
 
     # ---- navigation
     def flow(self) -> list[str]:
@@ -444,8 +457,9 @@ def run_monitor(info: dict, *, keep_default: bool = True, color: str = "auto") -
 
 def run_tui(settings: S.LaunchSettings | None, *, catalog: Catalog | None = None, feed: str | None = None, auto_run: bool = False,
             save: bool = False, open_page: bool = False, move_data: bool = False, retune: bool = False,
-            restart: bool = False) -> int:
-    """Open the launch screens. `settings` given and `auto_run`: skip the questions and go straight to the run."""
+            restart: bool = False, start_at: str | None = None) -> int:
+    """Open the launch screens. `settings` given and `auto_run`: skip the questions and go straight to the run. `start_at` (a step id,
+    `strata launch --customize`): open the screens at that step with `settings` as the choices so far, instead of at the first one."""
     catalog = catalog or Catalog()
     print("Looking at this computer…", flush=True)
     computer = catalog.computer()
@@ -460,7 +474,7 @@ def run_tui(settings: S.LaunchSettings | None, *, catalog: Catalog | None = None
         if save:
             store.save(s, s.name)
     ctx = Ctx(catalog=catalog, computer=computer, rows=rows, settings=s, glyphs=Glyphs(), feed=feed, move_data=move_data, retune=retune, restart=restart)
-    app = LaunchApp(ctx, auto_run=auto_run)
+    app = LaunchApp(ctx, auto_run=auto_run, start_at=start_at)
     result = app.run()
     if getattr(app, "return_code", 0) not in (0, None) or getattr(app, "_exception", None) is not None:
         # The screens stopped on an error of their own (not a launch failure, which the run screen shows). Never end quietly with exit 0.

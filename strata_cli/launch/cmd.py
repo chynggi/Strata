@@ -147,6 +147,9 @@ def add_parsers(sp: argparse._SubParsersAction) -> list[argparse.ArgumentParser]
                    help="when a model is already serving other choices (or holds the port), stop it and start these. Without it the screens ask once "
                         "and --no-tui refuses; --yes alone never restarts. The same choices are never restarted: the running address is printed")
     o.add_argument("--no-tui", action="store_true", help="no screens: serve, print the address and return")
+    o.add_argument("--customize", action="store_true",
+                   help="with --model or --model-path: open the screens at the Context step (the model and folder steps are skipped, "
+                        "Esc goes back to them) with the other flags as the starting choices, instead of starting at once")
     o.add_argument("--open", action="store_true", help="open the server's web page in your browser once it is serving (nothing opens a browser without this)")
     o.add_argument("--yes", action="store_true", help="do not ask questions (for one: whether to download the model on a computer with no engine yet)")
     o.add_argument("--plan", action="store_true", help="show what would happen and exit; nothing is changed")
@@ -987,7 +990,9 @@ def run_launch(a: argparse.Namespace) -> int:
                 return 0
         if interactive and have_choices:
             from strata_cli.launch import app
-            return _tui(app.run_tui, s, catalog=catalog, feed=a.feed, auto_run=True, save=bool(a.save_preset), open_page=bool(a.open),
+            customize = bool(getattr(a, "customize", False)) and bool(a.model or a.model_path)     # --customize needs a model to skip the model steps for
+            return _tui(app.run_tui, s, catalog=catalog, feed=a.feed, auto_run=not customize, start_at="context" if customize else None,
+                         save=bool(a.save_preset), open_page=bool(a.open),
                          move_data=move_data, retune=bool(getattr(a, "retune", False)), restart=bool(getattr(a, "restart", False)))
         try:
             result = runner.run()
