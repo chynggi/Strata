@@ -142,6 +142,20 @@ ARMS: tuple[Arm, ...] = (
         {"--expert-swaps": 32}, families=("poly",), backends=("cuda",), classes=("P",)),
     Arm("poly_window_4", "Shorter guess window (4 tokens)", "placement",
         {"--window": 4}, families=("poly",), backends=("cuda",), classes=("P",)),
+    # Not measured yet (tuning plan, step 1): thorough only and behind the small-answer-differences switch, so the tuner's own
+    # interleaved A/B (a win needs the margin in every round) decides, and nothing here is ever a default. --prompt-batch costs
+    # ~1.4 MiB of VRAM per token of its size, so the larger one needs a card with room; the smaller one gives VRAM back to the expert cache.
+    Arm("poly_prompt_batch_2048", "Read longer prompts in larger batches", "placement", {"--prompt-batch": 2048},
+        families=("poly",), backends=("cuda",), classes=("P",), goals=("coding", "chat"), needs=("vram_ge_12g",),
+        metric="prompt", deep_only=True),
+    Arm("poly_prompt_batch_512", "Read prompts in smaller batches, so more experts fit in graphics memory", "placement",
+        {"--prompt-batch": 512}, families=("poly",), backends=("cuda",), classes=("P",), deep_only=True),
+    Arm("poly_lookup_2", "Guess from a shorter repeat (2 tokens)", "placement", {"--lookup": 2},
+        families=("poly",), backends=("cuda",), classes=("P",), deep_only=True),
+    Arm("poly_lookup_5", "Guess only from a longer repeat (5 tokens)", "placement", {"--lookup": 5},
+        families=("poly",), backends=("cuda",), classes=("P",), deep_only=True),
+    Arm("poly_cpu_share_0", "Do not split a short batch's experts between the CPU and the card", "placement",
+        {"--cpu-share": 0}, families=("poly",), backends=("cuda",), classes=("P",), deep_only=True),
 )
 
 #: The per-request settings (3.1, 4.1). They need no restart, so every one is tried before any restart (5).
@@ -246,6 +260,7 @@ def condition_holds(name: str, ctx: Context) -> bool:
         "vram_ge_24g": ctx.vram_mib >= 24000,
         "discrete_gpu": not (ctx.arch and ctx.arch.split(":")[0] in ("gfx1151", "gfx1150", "gfx1103")),   # an APU's pool is shared with the expert cache
         "vram_le_8g": 0 < ctx.vram_mib <= 8400,
+        "vram_ge_12g": ctx.vram_mib >= 11500,
         "gfx12": bool(ctx.arch and ctx.arch.startswith("gfx12")),
         "windows_amd_kv_stream": ctx.backend == "hip" and sys.platform == "win32" and "--kv-resident" in ctx.base_args,
         "pcie_bound": 0 < ctx.vram_mib < 24000,

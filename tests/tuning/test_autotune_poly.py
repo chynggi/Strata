@@ -12,7 +12,7 @@ from tests.tuning.stub_session import FakeClock, StubSession, flag
 POLY_ARGS = ["--model", "m.gguf", "--max-context", "131072", "--expert-profile", "p.txt", "--draft-model", "d.gguf",
              "--conversation-cache-mib", "auto"]
 POLY_FLAGS = ["--max-context", "--threads", "--expert-swaps", "--window", "--lookup", "--expert-profile", "--draft-model",
-              "--conversation-cache-mib", "--vram-reserve-mib"]
+              "--conversation-cache-mib", "--vram-reserve-mib", "--prompt-batch", "--cpu-share"]
 SYSTEM = {"memory": {"total_mib": 64000}, "gpus": [{"index": 0, "vendor": "nvidia", "vram_total_mib": 12288}],
           "cpu": {"logical": 12, "physical": 6, "hybrid": False}}
 POLY_IDS = {a.id for a in tune_knobs.ARMS if "poly" in a.families}
@@ -71,6 +71,34 @@ class PlanTest(unittest.TestCase):
     def test_the_small_answer_differences_switch_adds_the_placement_knobs(self):
         self.assertEqual(ids(poly_ctx(allow_placement=True)),
                          ["poly_threads_physical", "poly_expert_swaps_128", "poly_expert_swaps_32", "poly_window_4"])
+
+    def test_the_unmeasured_knobs_are_thorough_only_and_need_the_switch(self):
+        new = {"poly_prompt_batch_2048", "poly_prompt_batch_512", "poly_lookup_2", "poly_lookup_5", "poly_cpu_share_0"}
+        self.assertFalse(new & set(ids(poly_ctx(allow_placement=True), "quick")))
+        self.assertFalse(new & set(ids(poly_ctx(), "thorough")))
+        self.assertEqual(new, new & set(ids(poly_ctx(allow_placement=True), "thorough")))
+        for a in tune_knobs.ARMS:
+            if a.id in new:
+                self.assertEqual((a.answer, a.deep_only, a.families), ("placement", True, ("poly",)))
+
+    def test_the_larger_prompt_batch_needs_a_card_with_room(self):
+        small = poly_ctx(allow_placement=True)
+        small.vram_mib = 8192                       # an 8 GB laptop card: 2048 tokens of batch would take its expert cache
+        chosen, skipped = tune_knobs.plan_arms(small, mode="thorough")
+        self.assertNotIn("poly_prompt_batch_2048", [p.arm.id for p in chosen])
+        self.assertIn("vram ge 12g", {s["id"]: s["reason"] for s in skipped}["poly_prompt_batch_2048"])
+        self.assertIn("poly_prompt_batch_512", [p.arm.id for p in chosen])
+        big = poly_ctx(allow_placement=True)
+        big.vram_mib = 12288
+        self.assertIn("poly_prompt_batch_2048", [p.arm.id for p in tune_knobs.plan_arms(big, mode="thorough")[0]])
+
+    def test_a_value_already_set_is_not_tried_again(self):
+        ctx = poly_ctx(allow_placement=True)
+        ctx.base_args = POLY_ARGS + ["--lookup", "5", "--prompt-batch", "512"]
+        got = ids(ctx, "thorough")
+        self.assertNotIn("poly_lookup_5", got)
+        self.assertNotIn("poly_prompt_batch_512", got)
+        self.assertIn("poly_lookup_2", got)
 
     def test_no_thread_arm_without_hyperthreading_or_when_it_is_already_set(self):
         ctx = poly_ctx()
