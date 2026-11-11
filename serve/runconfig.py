@@ -10,7 +10,6 @@ to the model (#37), so a change is used from the next start of, or switch to, th
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 

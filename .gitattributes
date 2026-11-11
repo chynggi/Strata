@@ -40,3 +40,7 @@ serve/web/vendor/** -text
 
 # llama.cpp's flash-attention kernel and its patch: git apply (tools/test_fattn_sync.py) rejects them with CRLF
 src/poly/fattn_mma.* text eol=lf
+third_party/strata-ggml/** text eol=lf
+
+# chat templates are read and hashed byte for byte (the served prompt, tools/test_qwen4_intake): LF wherever the repository is cloned
+*.jinja text eol=lf

@@ -158,12 +158,34 @@ RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces
 MODELS = {"gpt2": None, "gemma4": "gemma4"}   # tokenizer.ggml.model -> the pre-tokenizer it implies, if any
 
 
+class UnknownPreTokenizer(ValueError):
+    """The model names a pre-tokenizer type this file has no splitting rule for."""
+
+
+def pre_tokenizer_kind(pre) -> str | None:
+    """The splitting rule `pre` (the GGUF's tokenizer.ggml.pre, or a pack's tokenizer.json "pre") stands for: "qwen35", "deepseek3",
+    one of the fork's PRE_PATTERNS / PRE_SEQUENCES names (glm4, gemma4, flint, ...), or None for a type this file does not know.  An empty or missing value is the qwen35 default, as it always was."""
+    p = "qwen35" if pre is None or pre == "" else str(pre)
+    if p == "qwen35":
+        return "qwen35"
+    if p.startswith("deepseek"):
+        return "deepseek3"
+    if p in PRE_PATTERNS or p in PRE_SEQUENCES:      # fork (PolyStrata's models): the rules above, under their own name
+        return p
+    return None
+
+
 class Tokenizer:
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
                  pre: str = "qwen35", special_ids: dict[str, int] | None = None):
         self.tokens = tokens
         self.pre = pre
         self.raw = pre in RAW
+        if pre_tokenizer_kind(pre) is None:
+            # Not a fallback: another model's pre-tokenizer splits text differently, so encoding with the qwen35 rule would
+            # change every prompt without any error (llama.cpp has one rule per `tokenizer.ggml.pre` type for the same reason).
+            raise UnknownPreTokenizer("This model splits text with a rule Strata doesn't have yet (%r), so it isn't loaded: "
+                                      "running it with the wrong rule would change what it reads." % (pre,))
         self.token_types = token_types
         self.special_ids = special_ids or {}
         self.ids = {t: i for i, t in enumerate(tokens)}
@@ -187,6 +209,7 @@ class Tokenizer:
         self.ignore_merges = pre in IGNORE_MERGES
         self._re = regex.compile(self.pre_pattern)
         self._seq = [regex.compile(x) for x in self.pre_sequence] if self.pre_sequence else None
+        self._split = self._pieces                     # upstream's name for the pre-tokenizer's split
 
         # The literals matched directly instead of being run through BPE.  GGUF token types: 3 = CONTROL,
         # 4 = USER_DEFINED.  The two classes behave DIFFERENTLY and llama.cpp's own tokenizer settled which:
