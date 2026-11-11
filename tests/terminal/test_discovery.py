@@ -134,6 +134,20 @@ class GuiLayout(unittest.TestCase):
         self.assertIn("No installed models found. Looked in:", out.getvalue())
         self.assertIn("--install-dir", out.getvalue())
 
+    def test_launch_finds_setup_configs_for_both_picture_modes(self):
+        from unittest.mock import patch
+
+        cat = self.catalog()
+        for platform, prefix in (("win32", ""), ("linux", "linux-")):
+            with self.subTest(platform=platform), patch("strata_cli.launch.catalog.sys.platform", platform):
+                stem = f"strata-{prefix}gyro-gyro-s"
+                vision = self.install / f"{stem}-vision.json"
+                text = self.install / f"{stem}-novision.json"
+                vision.write_text(json.dumps(self.cfg))
+                text.write_text(json.dumps(self.cfg))
+                self.assertEqual(cat.installed_config("gyro-gyro-s", vision="gpu"), vision)
+                self.assertEqual(cat.installed_config("gyro-gyro-s", vision="off"), text)
+
     def test_an_explicit_install_dir_is_the_only_place(self):
         other = self.base / "other"
         other.mkdir()

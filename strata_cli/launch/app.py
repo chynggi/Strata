@@ -92,7 +92,7 @@ class Ctx:
         s = self.settings
         if not (s.family and s.model):
             return None
-        path = self.catalog.installed_config(self.catalog.tag_of(s.family, s.model))
+        path = self.catalog.installed_config(self.catalog.tag_of(s.family, s.model), vision=s.vision)
         if path is None:
             return None
         try:

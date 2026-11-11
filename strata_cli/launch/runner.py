@@ -1073,7 +1073,7 @@ class Runner:
 
     def installed_state(self) -> tuple[Path | None, dict | None]:
         tag = self.custom_tag or self.catalog.tag_of(self.s.family, self.s.model)
-        path = self.catalog.installed_config(tag)
+        path = self.catalog.installed_config(tag, vision=self.s.vision)
         if path is None:
             return None, None
         desc = self.catalog.strata.describe_config(path)

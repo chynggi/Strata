@@ -583,12 +583,23 @@ class Catalog:
                 out.append(d)
         return out
 
-    def installed_config(self, tag: str) -> Path | None:
-        name = f"strata-{tag.lower()}.json"
+    def installed_config(self, tag: str, *, vision: str | None = None) -> Path | None:
+        legacy = f"strata-{tag.lower()}.json"
+        prefix = "linux-" if sys.platform.startswith("linux") else ""
+        stem = f"strata-{prefix}{tag.lower()}"
+        plain = f"{stem}.json"
+        pictures, text = f"{stem}-vision.json", f"{stem}-novision.json"
+        if vision is None:
+            names = (legacy, plain, pictures, text)
+        elif vision == "off":
+            names = (text, plain, legacy, pictures)
+        else:
+            names = (pictures, plain, legacy, text)
         for folder in [self.root, *[p.path for p in self.places if p.path != self.root]]:
-            p = folder / name
-            if p.is_file():
-                return p
+            for name in names:
+                p = folder / name
+                if p.is_file():
+                    return p
         return None
 
     def data_dir_choice(self) -> tuple[Path, str]:
