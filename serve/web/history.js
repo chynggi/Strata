@@ -77,10 +77,13 @@
     return {keep: [...messages.slice(0, i), {role: "assistant", text, time: m.time, meta}], hidden: messages.length - i - 1};
   }
   // A branch: a new chat that starts with a copy of the first `end` messages. The original is not touched. The title says
-  // where it came from and stays: the first question does not rename it (the first-message case of #3823).
+  // where it came from and stays: the first question does not rename it (the first-message case of #3823). The chat's system
+  // prompt (chat.system, set from the composer's + menu) goes with it, so the branch answers as the chat did; a chat without
+  // one gets no `system` field.
   function branch(chat, messages, end, title, now = Date.now(), rnd = Math.random()) {
     const copy = JSON.parse(JSON.stringify(messages.slice(0, end)));
-    return {...newChat(now, rnd), title, parent: {id: chat.id, title: chatTitle(chat)}, messages: copy};
+    return {...newChat(now, rnd), title, parent: {id: chat.id, title: chatTitle(chat)}, messages: copy,
+            ...(chat.system ? {system: chat.system} : {})};
   }
 
   const api = {TITLE_MAX, newChat, chatTitle, cleanMessages, cleanChat, groupKey, filterChats, lostAttachments, draftOf, rewind,

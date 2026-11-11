@@ -47,6 +47,32 @@ function saveChat() {
 }
 function stillWriting() { toast("warn", tr("busy.stillWriting", "Still writing"), tr("busy.stopFirst", "Stop the answer first.")); }
 
+// ------------------------------------------------------------------ the system prompt of the open chat
+// One text a chat, kept with it: in the chat's own record with the saved-chats list on (chat.system), in "strata.chatSystem" without
+// (the one chat of before). The composer's + menu sets it (app.js); apiMessages() sends it as the first message of every request. It
+// is not a message of the chat, so it is not drawn as a turn, and like the chats it stays in this browser.
+let sysPending = null;               // the chat whose system prompt was typed and whose record is not written yet
+let sysTimer = 0;
+function systemPrompt() { return String((chat ? chat.system : store.get("chatSystem", "")) || ""); }
+function flushSystemPrompt() {
+  clearTimeout(sysTimer);
+  const c = sysPending;
+  sysPending = null;
+  if (!c) return;
+  c.time = Date.now();
+  chatStore.put(H.cleanChat(c));
+  renderSidebar();
+}
+function setSystemPrompt(text) {
+  if (!chat) { store.set("chatSystem", text); return; }
+  if (sysPending && sysPending !== chat) flushSystemPrompt();   // typed in another chat a moment ago: its record first
+  chat.system = text;
+  sysPending = chat;
+  clearTimeout(sysTimer);
+  sysTimer = setTimeout(flushSystemPrompt, 300);                // a record is the whole chat: not one write a keystroke
+}
+addEventListener("pagehide", flushSystemPrompt);
+
 // ------------------------------------------------------------------ the saved-chats list (#1787)
 // Turning the list on: the chat on the screen becomes the first record. Only when the switch is flipped in this visit: on a page
 // load the list is the list, so a fresh chat stays empty and the single chat of before ("strata.chat") is read once, when the
@@ -56,8 +82,9 @@ async function openChats(fromScreen) {
   chats = await chatStore.all();
   if (!chats.length) {
     const old = fromScreen ? messages : store.get("chat", []);
-    if (old.length) {
-      const c = {...H.newChat(), messages: old, time: old[old.length - 1].time || Date.now()};
+    const system = String(store.get("chatSystem", "") || "");       // the one chat's system prompt becomes its record's
+    if (old.length || (fromScreen && system)) {
+      const c = {...H.newChat(), messages: old, time: (old.length && old[old.length - 1].time) || Date.now(), ...(system ? {system} : {})};
       chats = [c];
       chatStore.put(H.cleanChat(c));                    // the migrated chat is a record like the others
     }
@@ -73,6 +100,8 @@ async function setChatList(on, fromScreen) {
   $("new-btn").hidden = on;                              // the list has its own New chat
   if (!on) {                                             // off writes the single chat, so a reload shows the chat you were in
     if (chat) messages = chat.messages;
+    flushSystemPrompt();
+    store.set("chatSystem", chat ? chat.system || "" : "");        // the chat you were in keeps its system prompt
     chat = null;
     store.set("chat", H.cleanMessages(messages));
     renderChat();
@@ -118,6 +147,7 @@ function renderSidebar() {
 
 function showChat(c) {
   clearUndo();
+  flushSystemPrompt();                    // a system prompt typed a moment ago is written to its own chat first
   chat = c; chatId = c.id; messages = c.messages;
   store.set("chatId", chatId);
   chatStore.put(H.cleanChat(chat));       // renderChat renders the list, so the write here does not render it again
@@ -133,7 +163,7 @@ function openChat(id) {
 }
 function startChat() {
   if (busy) { stillWriting(); return; }
-  if (!messages.length && !chat.parent) { $("input").focus(); return; }          // already a fresh chat
+  if (!messages.length && !chat.parent && !chat.system) { $("input").focus(); return; }   // already a fresh chat
   releasePending();
   closePanel();
   const prev = chatId, c = H.newChat();

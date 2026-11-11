@@ -102,6 +102,18 @@ const cases = {
     assert.equal(original.messages[1].tools[0].result, "secret result");
     assert.equal(H.chatTitle(H.branch(original, [], 0, "Branch of q1"), "x"), "Branch of q1", "a branch at the first message keeps its title");
   },
+  system_prompt_belongs_to_one_chat() {
+    const original = {id: "c1", title: "", time: 1, messages: convo(), system: "Answer in French."};
+    const plan = H.rewind(original.messages, 2);
+    const b = H.branch(original, plan.keep, plan.keep.length, "Branch of q1", 5, 0.25);
+    assert.equal(b.system, "Answer in French.", "a branch answers as the chat did");
+    b.system = "changed";
+    assert.equal(original.system, "Answer in French.", "the original keeps its own");
+    assert.ok(!("system" in H.branch({id: "c2", title: "", time: 1, messages: convo()}, [], 0, "B")), "no field for a chat without one");
+    assert.ok(!("system" in H.newChat()), "a new chat starts without one");
+    assert.equal(H.cleanChat(original).system, "Answer in French.", "it is saved with the chat record");
+    assert.equal(H.cleanChat(original).messages.length, 4, "and is not a message of the chat");
+  },
 };
 
 // ---------------------------------------------------------------- the stub IndexedDB

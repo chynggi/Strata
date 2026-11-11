@@ -75,6 +75,31 @@ main { flex: 1; min-height: 0; display: flex; }
 .composer-hint { font-size: var(--st-fs-xs); color: var(--st-ink-muted); margin-right: var(--st-s-2); font-variant-numeric: tabular-nums; }
 .attachments { display: flex; flex-wrap: wrap; gap: var(--st-s-2); padding: 2px 4px 0; }
 .st-composer.dragging { outline: 2px dashed var(--st-accent); outline-offset: 3px; }
+
+/* the + menu (left of the attach button) and the chat's system prompt it opens */
+.plus-wrap { position: relative; display: inline-flex; }
+.plus-menu { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 30; min-width: 200px; padding: 4px;
+  background: var(--st-surface); border: 1px solid var(--st-line); border-radius: var(--st-r-md); box-shadow: var(--st-sh-card); }
+.plus-menu[hidden] { display: none; }
+.plus-item { display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-3); width: 100%;
+  padding: 8px 12px; border: 0; border-radius: var(--st-r-sm); background: transparent; color: var(--st-ink);
+  font: 400 var(--st-fs-md)/1.3 var(--st-font); text-align: left; cursor: pointer; }
+.plus-item:hover, .plus-item:focus-visible { background: var(--st-surface-2); outline: 0; }
+.plus-mark { color: var(--st-accent-text); font-size: 10px; }
+#plus-btn.has { color: var(--st-accent-text); }
+.sys-box { display: flex; flex-direction: column; gap: var(--st-s-2); padding: var(--st-s-3); background: var(--st-surface-2);
+  border: 1px solid var(--st-line); border-radius: var(--st-r-md); }
+.sys-box[hidden], .sys-chip[hidden] { display: none; }
+.sys-head { display: flex; align-items: center; gap: var(--st-s-2); flex-wrap: wrap; }
+.sys-title { font-weight: var(--st-fw-medium); font-size: var(--st-fs-md); }
+.sys-head .spacer { flex: 1; }
+.st-composer .sys-box textarea { border: 1px solid var(--st-line); border-radius: var(--st-r-sm); background: var(--st-surface);
+  padding: 8px 10px; min-height: 4.5em; max-height: 40vh; font-size: var(--st-fs-md); resize: none; }
+.st-composer .sys-box textarea:focus { border-color: var(--st-focus); }
+.sys-chip { align-self: flex-start; max-width: 100%; padding: 3px 10px; border: 1px solid var(--st-line); border-radius: var(--st-r-pill);
+  background: var(--st-accent-tint); color: var(--st-accent-text); font: 400 var(--st-fs-sm)/1.4 var(--st-font);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.sys-chip:hover { border-color: var(--st-accent); }
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 6px 0 10px; border-radius: var(--st-r-pill);
         background: var(--st-surface-2); border: 1px solid var(--st-line); font-size: var(--st-fs-xs); color: var(--st-ink-soft); }
 .chip .st-btn--icon { width: 22px; height: 22px; border-radius: 50%; }

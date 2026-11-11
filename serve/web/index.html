@@ -69,9 +69,28 @@
       </div>
       <div class="composer-wrap">
         <form class="st-composer" id="composer">
+          <!-- this chat's system prompt (the + menu): the box while it is edited, the chip once it is set -->
+          <div class="sys-box" id="sys-box" hidden>
+            <div class="sys-head">
+              <label class="sys-title" for="sys-input" data-i18n="sys.title">System prompt</label>
+              <span class="muted small" data-i18n="sys.scope">Only for this chat</span>
+              <span class="spacer"></span>
+              <button type="button" class="st-btn st-btn--secondary" id="sys-clear" data-i18n="sys.clear">Clear</button>
+              <button type="button" class="st-btn st-btn--secondary" id="sys-done" data-i18n="sys.done">Done</button>
+            </div>
+            <textarea class="st-input" id="sys-input" rows="3" spellcheck="false" placeholder="How the model should behave in this chat, for example its role or the language it answers in&hellip;" data-i18n-placeholder="sys.placeholder"></textarea>
+          </div>
+          <button type="button" class="sys-chip" id="sys-chip" hidden></button>
           <div class="attachments" id="attachments" hidden></div>
           <textarea id="input" rows="2" placeholder="Ask anything&hellip;" aria-label="Message" data-i18n-placeholder="composer.placeholder" data-i18n-label="composer.message"></textarea>
           <div class="st-composer__bar">
+            <div class="plus-wrap">
+              <button type="button" class="st-btn st-btn--icon" id="plus-btn" title="Add to this chat" aria-label="Add to this chat" aria-haspopup="menu" aria-expanded="false" aria-controls="plus-menu" data-i18n-title="plus.title" data-i18n-label="plus.title">
+                <svg class="st-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+              <div class="plus-menu" id="plus-menu" role="menu" hidden>
+                <button type="button" class="plus-item" id="plus-system" role="menuitem"><span data-i18n="sys.title">System prompt</span><span class="plus-mark" id="plus-system-mark" hidden>&#9679;</span></button>
+              </div>
+            </div>
             <button type="button" class="st-btn st-btn--icon" id="attach-btn" title="Attach a text file (or drop it here)" aria-label="Attach a file" data-i18n-label="composer.attachLabel">
               <svg class="st-icon"><use href="web/sprite.svg#i-attach"/></svg></button>
             <input type="file" id="file" multiple hidden>

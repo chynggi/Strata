@@ -1007,6 +1007,7 @@ function renderChat() {
   chat.querySelectorAll(".st-msg").forEach((e) => e.remove());
   $("chat-empty").hidden = messages.length > 0;
   messages.forEach((m, i) => chat.appendChild(msgEl(m, i)));
+  renderSystem();
   renderSidebar();
   renderParent();
   renderUndoBar();
@@ -1090,6 +1091,8 @@ $("chat").addEventListener("toggle", (e) => {
 
 function apiMessages() {
   const out = [];
+  const system = systemPrompt().trim();             // this chat's system prompt (the composer's + menu): the first message, every request
+  if (system) out.push({role: "system", content: system});
   for (const m of messages) {
     if (m.role === "user") {
       const imgs = (m.images || []).filter((i) => i.url);
@@ -1353,29 +1356,78 @@ $("input").addEventListener("keydown", (e) => {
 function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, innerHeight * 0.4)}px`; }
 $("input").addEventListener("input", autosize);
 
+// ------------------------------------------------------------------ the + menu and the chat's system prompt
+// The + button left of the attach button opens a small menu; its System prompt item opens a box above the message field. The text is
+// this chat's own (systemPrompt / setSystemPrompt in chats-ui.js) and goes first in every request (apiMessages). With text in it
+// and the box closed, a chip says so; the + gets a dot.
+let sysOpen = false;
+function renderSystem() {
+  const text = systemPrompt(), has = !!text.trim(), input = $("sys-input");
+  if (document.activeElement !== input && input.value !== text) input.value = text;   // another chat's, or put back by Undo
+  $("sys-box").hidden = !sysOpen;
+  const chip = $("sys-chip");
+  chip.hidden = sysOpen || !has;
+  chip.textContent = tr("sys.chip", "System prompt: {text}", {text: text.trim().replace(/\s+/g, " ").slice(0, 60)});
+  $("plus-system-mark").hidden = !has;
+  $("plus-btn").classList.toggle("has", has);
+}
+function openSystem() {
+  sysOpen = true;
+  closePlusMenu();
+  renderSystem();
+  autosizeSystem();
+  $("sys-input").focus();
+}
+function closeSystem() {
+  flushSystemPrompt();
+  sysOpen = false;
+  renderSystem();
+  $("input").focus();
+}
+function autosizeSystem() { const t = $("sys-input"); t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight + 2, innerHeight * 0.4)}px`; }
+function closePlusMenu() { $("plus-menu").hidden = true; $("plus-btn").setAttribute("aria-expanded", "false"); }
+$("plus-btn").onclick = (e) => {
+  e.stopPropagation();
+  const open = $("plus-menu").hidden;
+  $("plus-menu").hidden = !open;
+  $("plus-btn").setAttribute("aria-expanded", String(open));
+  if (open) $("plus-system").focus();
+};
+$("plus-system").onclick = openSystem;
+$("sys-chip").onclick = openSystem;
+$("sys-done").onclick = closeSystem;
+$("sys-clear").onclick = () => { $("sys-input").value = ""; setSystemPrompt(""); renderSystem(); autosizeSystem(); $("sys-input").focus(); };
+$("sys-input").addEventListener("input", () => { setSystemPrompt($("sys-input").value); autosizeSystem(); renderSystem(); });
+$("sys-input").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closeSystem(); } });
+document.addEventListener("click", (e) => { if (!$("plus-menu").hidden && !e.target.closest(".plus-wrap")) closePlusMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("plus-menu").hidden) { closePlusMenu(); $("plus-btn").focus(); } });
+
 // one chat, as before: New chat clears it, with an Undo (with the saved-chats list on, its own New chat button does this job)
 $("new-btn").onclick = () => {
   if (busy) { stillWriting(); return; }
   if (panel) { closePanel(); }
   clearUndo();
   releasePending();
-  if (!messages.length) return;
-  const backup = messages;
+  if (!messages.length && !systemPrompt()) return;
+  const backup = messages, backupSystem = systemPrompt();
   clearToolMedia();
   messages = [];
+  setSystemPrompt("");                                           // the system prompt belongs to the chat: a new chat starts without one
+  sysOpen = false;
   saveChat();
   renderChat();
   toast("info", tr("chat.newToast", "New chat"), tr("chat.clearedToast", "The last one was cleared."), 6000, {label: tr("undo", "Undo"), run: () => {
-    if (busy || messages.length) return;                         // a new question since: the cleared chat is not put back over it
-    messages = backup; saveChat(); renderChat();
+    if (busy || messages.length || systemPrompt()) return;       // a new question since: the cleared chat is not put back over it
+    messages = backup; setSystemPrompt(backupSystem); saveChat(); renderChat();
   }});
 };
 $("export-btn").onclick = () => {
-  if (!messages.length) { toast("info", tr("export.nothing", "Nothing to save yet")); return; }
+  if (!messages.length && !systemPrompt().trim()) { toast("info", tr("export.nothing", "Nothing to save yet")); return; }
   const tools = (m) => (m.tools || []).filter((t) => t.result != null).map((t) =>
     `<details><summary>Tool ${t.server ? `${t.server} / ` : ""}${t.tool || t.name}${t.ok ? "" : " (error)"}</summary>\n\n` +
     `\`\`\`json\n${JSON.stringify(t.arguments || {}, null, 2)}\n\`\`\`\n\n\`\`\`\n${t.result}\n\`\`\`\n\n</details>\n\n`).join("");
-  const md = messages.map((m) => m.role === "user" ? `## You\n\n${m.text}\n` :
+  const system = systemPrompt().trim();
+  const md = (system ? `## System\n\n${system}\n\n` : "") + messages.map((m) => m.role === "user" ? `## You\n\n${m.text}\n` :
     `## ${health.model}\n\n${m.reasoning ? `<details><summary>Thinking</summary>\n\n${m.reasoning}\n\n</details>\n\n` : ""}${tools(m)}${m.text || m.error || ""}\n`).join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([md], {type: "text/markdown"}));
