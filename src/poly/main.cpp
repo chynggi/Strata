@@ -1089,6 +1089,10 @@ void usage() {
                  "  --ram-experts-mib N    hold N MiB of RAM for the experts outside VRAM, during answers too: the ones\n"
                  "                         used most lately; the rest stay in the file cache for other programs to take,\n"
                  "                         and are read back when a token needs them (default: all of them)\n"
+                 "  --ram-keep-gib W       RAM to leave available for your own work, in GiB (default 0 = none; the\n"
+                 "                         environment's STRATA_RAM_KEEP_GIB is the same, the flag wins): the experts\n"
+                 "                         outside VRAM get the RAM available at the load less W, as --ram-experts-mib\n"
+                 "                         would, or all of it when they fit; --ram-experts-mib set wins\n"
                  "  --prompt-batch N       prompt tokens read at a time (default 1024); about 1.4 MiB of VRAM each\n"
                  "  --stage-mib N          VRAM the experts outside the cache pass through in a prompt batch (default\n"
                  "                         128 on an NVIDIA card where a longer read widens it, else 2048; never more\n"
@@ -1160,7 +1164,7 @@ int main(int argc, char** argv) {
     Options o;
     CacheFlags cache;
     Sampling s;
-    bool want_serve = false;
+    bool want_serve = false, keep_flag = false;
     long long max_new = 32;
     int top_probs = 0, lookup = 3, image_pad = -1, check = 0;
     std::string images;
@@ -1202,6 +1206,7 @@ int main(int argc, char** argv) {
         else if (a == "--draft-model") o.draft_model = val();
         else if (a == "--expert-swaps") o.expert_swaps = std::atoi(val());
         else if (a == "--ram-experts-mib") o.ram_experts_mib = std::atoll(val());
+        else if (a == "--ram-keep-gib") o.ram_keep_gib = std::atof(val()), keep_flag = true;
         else if (a == "--tail-skip") o.tail_skip = std::atoi(val());
         else if (a == "--skip-weight") o.skip_weight = (float) std::atof(val());
         else if (a == "--cache-bias") o.cache_bias = (float) std::atof(val());
@@ -1259,6 +1264,14 @@ int main(int argc, char** argv) {
     if (check > 0) o.kv_grow = false;
     // over --tail-skip, as Strata's engine reads it: =0 turns a model's default off
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
+    // STRATA_RAM_KEEP_GIB is --ram-keep-gib for a program that cannot pass the flag (the app's "Leave 20% for my work"); the flag wins
+    if (!keep_flag)
+        if (const char* v = std::getenv("STRATA_RAM_KEEP_GIB"); v != nullptr && v[0] != '\0' && std::atof(v) > 0.0)
+            o.ram_keep_gib = std::atof(v);
+    if (!(o.ram_keep_gib >= 0.0) || o.ram_keep_gib > 4096.0) {
+        std::fprintf(stderr, "strata-poly: --ram-keep-gib needs a number from 0 to 4096 (GiB)\n");
+        return 2;
+    }
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||

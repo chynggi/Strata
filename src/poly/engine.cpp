@@ -2149,6 +2149,30 @@ void Engine::load(const Options& o) {
         if (L.moe)
             expert_runs(L, n_expert_, [&](int e) { return !L.slot[(size_t) e]; },
                         [&](const uint8_t*, size_t n) { outside_bytes_ += n; });
+    // --ram-keep-gib W: the RAM the person wants left for their own work.  An explicit --ram-experts-mib wins; else the
+    // experts the CPU holds get what is available now less W, and nothing is held back when they all fit in that.
+    if (opt_.ram_keep_gib > 0 && opt_.ram_experts_mib < 0) {
+        const size_t avail = ram_available();
+        const size_t keep = (size_t) (opt_.ram_keep_gib * (double) (1ULL << 30));
+        if (avail == 0) {
+            std::fprintf(stderr, "strata-poly: --ram-keep-gib %.2f: the machine's available RAM cannot be read, so the "
+                                 "experts are not held back\n", opt_.ram_keep_gib);
+        } else {
+            const size_t room = avail > keep ? avail - keep : 0;
+            if (room >= outside_bytes_) {
+                std::fprintf(stderr, "strata-poly: --ram-keep-gib %.2f: %.1f GiB are available and the %.1f GiB of "
+                                     "experts outside VRAM fit beside it, so none are held back\n",
+                             opt_.ram_keep_gib, (double) avail / (1 << 30), (double) outside_bytes_ / (1 << 30));
+            } else {
+                // 512 MiB at least: a budget under the slots a call needs would only slow every token
+                opt_.ram_experts_mib = (int64_t) std::max<size_t>(room >> 20, 512);
+                std::fprintf(stderr, "strata-poly: --ram-keep-gib %.2f: %.1f GiB are available, so %lld MiB of RAM "
+                                     "are held for the %.1f GiB of experts outside VRAM (as --ram-experts-mib %lld)\n",
+                             opt_.ram_keep_gib, (double) avail / (1 << 30), (long long) opt_.ram_experts_mib,
+                             (double) outside_bytes_ / (1 << 30), (long long) opt_.ram_experts_mib);
+            }
+        }
+    }
     if (opt_.ram_experts_mib >= 0) {
         // each size of slot takes the share of the budget its experts outside VRAM have of all of those
         pool_size_of_.assign(layers_.size(), 0);

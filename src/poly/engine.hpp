@@ -79,6 +79,11 @@ struct Options {
                                   ///< the ones used most lately are read into it from the files; the others are left
                                   ///< to the file cache, which gives them to whatever needs the memory, and come back
                                   ///< from it or the disk when a token routes to them.  Below 0: all of them
+    double ram_keep_gib = 0;      ///< the RAM, in GiB, the person wants left available for their own work (0: none).
+                                  ///< Where ram_experts_mib is not set (below 0), the experts outside VRAM that the
+                                  ///< CPU holds get what the machine has available at the load less this: all of
+                                  ///< them when they fit in it, else a budget as ram_experts_mib's.  A ram_experts_mib
+                                  ///< that is set wins.
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     bool kv_grow = true;          ///< the attention caches get VRAM as the sequence grows, where the card can map it
