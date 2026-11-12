@@ -73,9 +73,11 @@ Source setup does not make an unsupported model or backend compatible. Strata's 
   the packages and the update feed: [packaging/README.md](packaging/README.md) and [packaging/UPDATES.md](packaging/UPDATES.md).
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md);
   Mac (Metal): [docs/MAC.md](docs/MAC.md).
-- Tests: the Terminal and Control tests are in `tests/terminal` (`python -m pytest tests/terminal`). The app's UI
-  tests run with `npm test` in `apps/host`. Setup's own tests run without a GPU or downloads:
-  `python tools/test_setup_<name>.py` (for example `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
+- Tests: the Terminal and Control tests are in `tests/terminal`. Do not run them on this PC: a local run takes too
+  long. They run on GitHub only, in the `py-tests` step of the `check` workflow (the whole of `tests/`, but
+  `tests/snapshot`, which has a step of its own). The app's UI tests run with `npm test` in `apps/host`. Setup's own
+  tests run without a GPU or downloads: `python tools/test_setup_<name>.py` (for example `tools/test_setup_amd.py`,
+  `tools/test_setup_choices.py`).
 - Keep the docs' style: plain words, short sentences, written for non-technical users first. Give measured numbers
   with what they were measured on. Make no claim without a measurement.
 
