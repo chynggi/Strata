@@ -2002,6 +2002,45 @@ the laptop, with Qwen3.6 UD-Q3_K_M as setup runs it, six turns of 188 tokens beh
 with either value, two rounds of each in turn. The new prompts of 300, 500 and 800 tokens after them took 499 to
 844 ms with 1,024 and 1,276 to 1,432 with 256, where their calls copy ahead and the CPU takes no share.
 
+### CPU left to other programs
+
+The engine took a thread for every usable CPU. A thread without a task spins a millisecond before it sleeps,
+and the tasks of a token come closer together than that, so while an answer was written the CPU was all but full.
+The engine now takes 70% of the CPUs, rounded, unless `--threads` names a count. A container with a CPU quota
+(`/sys/fs/cgroup/cpu.max`, as a rented cloud machine has) keeps every CPU: it has no desktop to leave CPU to, and
+that is where GLM 5.3 Flash and DeepSeek V4 Flash run, whose CPU experts are most of a token (on the RTX 5090
+machine on 2026-10-12, GLM's took 15 ms a token with 18 threads where 12.8 with 24). A server with no quota is
+taken for a PC: give it `--threads` with its CPU count for those two models. On a hybrid CPU setup writes a count
+of its own, as before.
+
+It was measured with a test script kept outside the repository: Qwen3.6 UD-Q3_K_M, the engine of
+0.1.45-poly.7 alone, the README's short chat, a prompt of about 24,000 tokens and the short chat again, 256 tokens
+each, three rounds and the medians of the last two. Under Linux on 16 cores and 32 threads of a node of the RTX
+PRO 6000's Xeon (`taskset`), the card held to 8 GB, with others' work on 10 to 15% of each core; tokens/s
+written, and the share of the 32 CPUs busy while it wrote:
+
+| Threads | Short chat | After the prompt | Short chat again | CPU busy | Alongside a load on 8 CPUs |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 32, as before | 177.9 | 178.3 | 211.5 | 90 to 94% | 146.0, 136.6, 155.3; the load at 60 to 63 of its 95 alone |
+| 22, the new default | 185.0 | 177.1 | 209.6 | 66 to 67% | 173.8, 165.0, 191.2; the load at 62 to 65 |
+| 16 | 186.5 | 170.2 | 210.5 | 49 to 50% | 173.9, 152.8, 184.9; the load at 65 to 68 |
+
+The columns beside the load are one session's, the others another's. A thread that has to share its CPU with
+another program is the slowest of a layer's, and the layer waits for it, which is why fewer threads write faster
+beside a load. A thread of the test that slept 5 ms woke 3.1 to 3.5 ms late at the 99th percentile with 32
+threads, and 0.1 ms late with 22 or 16. On the laptop (RTX 4070 Laptop, i7-14700HX, Windows), where setup writes
+13 threads, the CPU was 41 to 45% busy while it wrote; 10 threads made it 33 to 37% at the same speed within the
+runs' noise, and 8 threads 28 to 31% at 0% to 4% slower.
+
+Three other ways were measured and are not taken. Keeping more VRAM free costs experts in VRAM: 1,024 MiB
+(the default leaves 256) wrote 6 to 7% slower under Linux, and as fast on the laptop, whose cache gave up 387
+of its 2,712 experts; 2,048 MiB wrote 11 to 17% slower under Linux and 3 to 6% slower on the laptop. A lower
+priority (`nice 10`, Windows' below normal) wrote as fast alone, and a load beside it ran about as fast as beside
+the normal priority (64 to 66 against 61 to 65 under Linux), most likely because what the two share is a core's
+two threads and the memory, which a priority does not divide. A
+CPU set of 22 CPUs (20 on the laptop) wrote 4% to 9% slower than the same count of threads free to move. The
+Windows runs with every CPU taken by a load did not run: the laptop's RAM was in use.
+
 ### Less of the PC's RAM and VRAM
 
 On the laptop (RTX 4070 Laptop 8 GB, 32 GB of RAM), Qwen3.6 UD-Q3_K_M held the whole of its 15.9 GiB file in its
@@ -2091,6 +2130,75 @@ and 232.18); one run each, 1,024 tokens of a short chat at 196.5 where 227.7 and
 where 200.6. With the experts held still and no guesses (`--expert-swaps 0 --cpu-share 0 --tail-skip 0 --window 1`)
 the 256 tokens of each of the three answers were the same as with every expert in RAM, on Windows and on Linux.
 
+`--lock-experts`, off by default, goes the other way: the experts outside VRAM are locked in RAM, so the system
+cannot hand their memory to another program. Without it they are pages of the file, which Windows counts in the
+engine's working set and Linux in its page cache, and either takes them back when memory runs short; a token that
+needs one then reads it from the disk again. A user's 16.7 GB file had 3.4 GB of it left in memory under Linux
+([issue 79](https://github.com/VecSzn/PolyStrata/issues/79)). The engine locks them once the load has read them
+in (mlock under Linux, VirtualLock under Windows), and between requests unlocks the ones the cache has taken and
+locks the ones it has given up. Linux locks no more than `ulimit -l` allows; past it the engine says how much it
+locked and the rest stay in the file cache. It does not go with `--ram-experts-mib`.
+
+On the laptop with Qwen3.6 UD-Q3_K_M it locked 10.1 GiB. With Windows emptying the engine's working set from
+outside, as it does when memory runs short, 0.07 GiB of the 14.05 stayed without the lock and 10.13 GiB with it.
+After a 32K prompt the cache gave up 345 experts, and 10.63 GiB stayed. With the cache the same size in both runs
+(`--vram-reserve-mib 2000`), the three answers above were the same with it and without it.
+
+Under Linux, on the lab's RTX PRO 6000 held to about 8.9 GB, it locked 8.8 GiB, which /proc showed as VmLck.
+With `ulimit -l` at 1 GiB it locked 1.0 GiB and said that mlock refused the rest at that limit. A short chat, a
+32K prompt and the short chat again left 8.86, 9.24 and 9.24 GiB locked: the attention caches grew with the long
+prompt, the cache gave up experts for them, and those were locked as well. The answers were the same with and
+without it.
+
+#### When the experts do not fit in RAM
+
+Without `--ram-experts-mib` the engine looks at the RAM that is free once the expert cache is filled. When the
+experts outside VRAM and 4 GiB more do not fit in it, it takes a budget of what is free less 4 GiB, as if
+`--ram-experts-mib` had named it, and says so:
+
+    strata-poly: 11.7 GiB of RAM free for 9.3 GiB of experts outside VRAM: they do not fit, so the ones used most stay in RAM (--ram-experts-mib -1 maps them all)
+
+Otherwise every expert stays mapped, as before, and `-1` keeps them mapped whatever the RAM. Free is what the system
+reports (MemAvailable under Linux, the available physical memory under Windows), and under Linux no more than the
+room under the cgroup memory limits on the way to the root, a group's file pages counted as free: a container sees
+the host's RAM in /proc/meminfo. With `--lock-experts` the engine takes no budget by itself.
+
+Through the mapping, experts that do not fit come back a page fault at a time, each fault a few pages read and
+waited for. Measured on the lab's machine with Qwen3.6 UD-Q3_K_M (a 15.9 GiB file, 9.3 GiB of experts outside the
+card): the card held to about 8 GB, 16 cores and 32 threads of the Xeon's second node, the engine in a systemd scope
+with MemoryMax of 12 or 10 GB and no swap, and the model file dropped from the page cache before every start
+(POSIX_FADV_DONTNEED: a page that another cgroup read in is not charged to the scope, and runs before that found the
+file in memory). Three rounds, the medians of the last two, tokens/s:
+
+| RAM | | First short chat | After 24,000 tokens | Short chat again |
+| --- | --- | ---: | ---: | ---: |
+| 12 GB | every expert mapped | 51.1 | 78.4 | 94.0 |
+| | 6,144 MiB | 56.1 | 86.1 | 115.8 |
+| | 7,168 MiB | 60.0 | 81.0 | 115.8 |
+| | by itself: 7,902 MiB | 59.5 | 84.6 | 138.8 |
+| 10 GB | every expert mapped | 39.1 | 48.2 | 69.2 |
+| | 4,096 MiB | 51.1 | 59.1 | 80.1 |
+| | by itself: 5,855 MiB | 51.1 | 64.1 | 91.7 |
+| no limit | every expert mapped | 63.1 | 168.5 | 202.8 |
+
+In another session, two runs under 12 GB with the build as committed, every expert mapped wrote 50.8, 75.3 and 97.9
+tokens/s and the budget it took 57.0, 77.0 and 130.7: after the long prompt the two are closer there, and that cell
+moves most from session to session. The engine found 11.7 GiB free under the 12 GB limit and 9.7 GiB under 10 GB.
+With the experts held still, the three
+answers under 12 GB were the same token for token with the budget it took and with every expert mapped. The first
+chat is slow in every row: it comes right after the load, with none of the file in memory yet.
+
+Two more were tried and left out. Reading the experts outside the budget past the page cache (O_DIRECT), which the
+lab's NVMe gives 3.41 GB/s with eight threads reading 256 KiB where plain pread gives 2.06 from a cold cache, wrote
+slower with the same budget: 6,144 MiB wrote 58, 79 and 99 tokens/s where it wrote 63, 90 and 114 through the cache,
+since the cache holds what the budget leaves free. A budget that makes up for it has to be just right: 8,192 MiB wrote
+57, 82 and 125, and 9,216 MiB 54, 64 and 116, when the engine's own memory and the mapped part of the budget no longer
+fitted under 12 GB. And reading the file ahead at the load, as Windows does, did not make the first answer after a
+cold start faster under Linux: with madvise(MADV_WILLNEED) over the spans it came at 63.5 tokens/s and with a thread
+of 16 MiB preads at 61.8, where 63.1 without either, with no limit.
+
+Windows decides the same way and was not measured; the budget's reads there are the ReadFile ones measured above.
+
 ### Qwen3.6 on two engines
 
 Since its 0.1.44 the [Strata](https://github.com/Niko1221/Strata) project runs Qwen3.6-35B-A3B on an engine path of
@@ -2119,6 +2227,281 @@ block and repeats. "3 GiB of experts" gives both the same expert budget (strata-
 Writing is a 256-token answer to a 45-token code prompt (strata-poly's answers ended at token 243); the prompts are
 that one repeated. strata-q36 reads a short prompt 1.6 times as fast; at 31K the two are close, and with the
 smaller expert budget strata-poly is ahead. The time strata-poly loses on a short prompt is the next thing to look at.
+
+## strata-poly opt-ins from PolyStrata 0.1.45-poly.9
+
+These came with the second PolyStrata update (its `main` of 2026-11-12, see [FORK.md](FORK.md)). Each is off by
+default and changes nothing for the Strata project's engine. The text and the numbers are PolyStrata's, measured
+on the machines named; none was run on this fork's PCs.
+
+### Guesses inside the slots (`--batch-mtp`)
+
+Qwen3.6, Ornith 1.5 and Tiel Coder carry a block that guesses the next token (MiniCPM-V's file has none). Alone, a
+request uses it as always. With `--batch-mtp` in the config's `"args"` (or `STRATA_BATCH_MTP=1` in the server's environment) the
+slots that write together use it too, as Basalt and the Strata project's engine do: before each step every slot's
+block guesses the token after its next one, all slots in one pass, and the step takes each slot's token and its
+guess together. Where the guess is what the model picks, the slot gets two tokens from that step; where it is not,
+the slot goes back to the state after its first token. The answers are the ones each request gets alone.
+
+Measured with `--check-batch` (the same tokens as each prompt alone, a Python prompt of 47 tokens, 160 tokens
+written, 94 to 96% of the guesses right), tokens/s of all slots together:
+
+| Machine, model | slots | without | with `--batch-mtp` |
+| --- | ---: | ---: | ---: |
+| RTX PRO 6000 (Linux), Qwen3.6 UD-Q3_K_M, every expert on the card | 2 | 295-333 | 412-472 |
+| same | 3 | 428-429 | 442-446 |
+| same, the card held to 9 GB (most experts on the CPU) | 2 | 144-154 | 160-164 |
+| M5 Ultra (Metal), Qwen3.6 UD-Q2_K_XL | 2 | 140 | 173 |
+
+It pays most with two slots. With three a step reads the experts of six rows instead of three, and that takes back
+most of what the guesses save. It is off by default. Two chats at once through the server gave each the same text
+as alone (the RTX PRO 6000, greedy, the expert cache held still).
+
+### One VRAM pool for the run (`--vram-pool`, HIP)
+
+Opt-in `--vram-pool` (strata-poly, one card, VMM): the engine claims the card's VRAM once at load, as 2 MiB
+handles, and keeps it for the whole run. The attention caches and the expert cache trade handles of that pool as the
+context grows and shrinks, and nothing is released to the card, so VRAM released to the card that does not come back ([AMD_HIP.md](AMD_HIP.md)) does not
+arise (not tried on Linux ROCm). `--vram-reserve-mib` is then the margin left outside the pool (256 MiB at least),
+not VRAM kept free and idle. Under Windows the claim is sized by the budget Windows gives the process, read again
+every 256 MiB while the pool grows, because that budget falls as the process does (on an RX 5700 XT, 8 GB: 7,383
+to 6,956 MiB while 3.4 GiB were claimed), and memory past it is moved out to system RAM: sized from the card's free
+VRAM, a margin of 256 MiB left the process 150 MiB over its budget and 2.4 GB were moved out (decode 6 tokens/s).
+The pool is capped at what the model can use (every expert slot, the caches' whole address range and 512 MiB), so a
+card that holds the model keeps the rest. Measured on that RX 5700 XT (Ryzen 5 3600X, 32 GB, Windows 11), Tiel
+Coder 35B-A3B UD-Q4_K_XL, `--max-context 262144 --kv q8_0`, a 34K-token prompt between short chats:
+`--vram-reserve-mib 2048` without the pool held 1,172 experts and wrote 40 to 46 tokens/s after the prompt;
+`--vram-pool` with a margin of 256 MiB held 1,882 and wrote 50 to 53, with the same 648 MiB of shared GPU memory and
+the prompt read at 312 against 314 tokens/s. A long read grows the pinned host buffers, which count as shared GPU
+memory (+460 MiB after a 53K prompt); that is not a spill. `STRATA_FREEZE_EXPERTS` cannot grow the caches past the
+pool.
+
+### Parked conversations on disk (`STRATA_NO_SPILL`)
+
+Each parked conversation's blob is written to a temporary file between requests and its heap freed; a later restore maps that file instead of reading from RAM. Set `STRATA_NO_SPILL=1` on the engine command line or in the config's `"env"` (any nonzero value) to keep every blob on the heap (parking still works, but RAM use grows accordingly).
+
+### Opt-in split-key decode attention in strata-poly (wave32 HIP)
+
+`STRATA_HIP_SPLIT_ATTEND=1` (or `=2`) replaces the three decode attention
+kernels (scores, softmax, values), which walk the whole context in 16 to 32
+blocks, with one kernel that splits the keys into blocks of 512, keeps a running
+softmax per block and joins the blocks afterwards. It is the fuller version of
+the idea behind `STRATA_HIP_VALUE_SPLIT`: the keys are split in the score phase
+too, so the card has enough blocks to read the cache at its memory speed.
+
+It applies only to `attend()` with head dimension 256, eight query heads per KV
+head, a Q8_0 key and value cache, at least 4,096 keys, no sliding window, ring
+buffer, sinks or whole-context attention, and a card with 32-lane waves. Up to
+four tokens go in one launch (a decode step with MTP drafts). It needs room for
+its partial sums in the existing score scratch (the engine passes its size as
+`part_floats`); where that is short, or any condition
+fails, the old kernels run unchanged. Only the values `1` and `2` enable it;
+unset, `0` and other values keep the default path, byte-identical to before.
+Set it before starting the engine: a captured HIP graph keeps the path chosen
+at capture time. It allocates no VRAM.
+
+* `=1` reads the queries as FP32, as the old kernels do. Against an FP64
+  reference its error is about 1e-8 on outputs of 0.005 to 0.03, the same size
+  as the old kernels' (8e-9).
+* `=2` also quantizes each query to int8 in blocks of 32 values and computes
+  the scores with integer dot products (`dp4a`; on gfx1010 and gfx1012 the
+  same SDWA sequence the other kernels use). Its error against FP64 is
+  1.2e-5 to 5.7e-5 on the same outputs, about 0.2% of the largest value. That
+  is a different rounding of the query, not a reordering: judge it as you
+  would a lower-precision attention. `=1` is the choice when exactness matters.
+
+Measured on an RX 5700 XT (gfx1010, 8 GB), Windows, `strata-poly` with
+Cyber-Tiel-Coder-35B-A3B UD-Q4_K_XL, Q8_0 KV, MTP on. A microbenchmark of
+`attend()` alone at 110K keys: one token 2.34 ms with the old kernels, 1.62 with
+`STRATA_HIP_VALUE_SPLIT=1`, 1.05 with `=1` and 0.91 with `=2`; four tokens 8.54,
+8.56, 3.42 and 2.06 ms (2.5x and 4.1x faster than the old kernels). At 8K keys
+the gain is 1.3x to 1.9x, below 4,096 keys the old kernels run. On a replay of a
+recorded agentic session (eight requests at 90K to 112K tokens of context, the
+same each time), decode went from 24.5 tokens/s with the old kernels to 27.5
+with the value split, 32.2 with `=1` (graphs off) and 37.4 with `=2` (graphs
+on), with 76% to 88% of drafts accepted in each run. At 100K tokens of context
+attention was about 57% of a decode step before. Prompt processing is unchanged (`attend_batch` is another path).
+
+A needle test (a code word hidden in 54K tokens, asked for twice) found the
+word both times with `=1`.
+
+What was not tested: any card but gfx1010, CUDA and SYCL builds (the kernel
+is HIP only and compiled out elsewhere), other head geometries (they use the
+old kernels), and the text of long generations beyond the checks below.
+`poly_hip_split_attend_test` (79 checks, about 12 s, needs a card; exits 77
+without one) compares both modes with an FP64 reference and the old kernels
+at sizes around the 4,096-key start and the 512-key blocks, with the position
+read on the card, the short-scratch fallback and a graph replay at three
+positions.
+
+### Opt-in FP32 prompt attention in strata-poly (HIP)
+
+`STRATA_HIP_PREFILL_FP32=1` or `=2` runs the two products of the prompt's attention (`attend_batch()`: the
+scores, then the weighted values, for every block of keys) on FP32 inputs instead of FP16 ones with an FP32
+sum. On an RX 5700 XT (gfx1010) hipBLAS's FP32 products reach 4.5 to 5 TFLOPS, its FP16-input ones 3 to 4: the
+card has no packed FP16 math with an FP32 sum, so the halves only add the work of rounding to them. The
+queries, the keys and values and the softmax's weights stay FP32. It is also closer to the exact attention:
+against an FP64 reference, on outputs of 0.009 to 0.04, the default path's largest error is 2e-6 to 1.5e-5
+(about 3e-4 of the largest output, from rounding to halves), these paths' 6e-9 to 9e-8.
+
+- `=1`: hipBLAS SGEMM on an FP32 copy of each block of the cache. Needs a q8 workspace of at least 256 FP32
+  rows (the engine's holds 1,024); a block of keys is shortened by 16 where it would be a multiple of 1,024,
+  at which hipBLAS's FP32 values product runs at half its speed.
+- `=2`: our own kernels (`src/poly/hip_prefill_gemm.cuh`) read the q8_0 codes and fp16 scales as they lie,
+  so there is no FP32 copy, no dequantizing kernel and no workspace. 128 x 128 x 16 register tiles of
+  8 x 8 outputs a thread, double-buffered in LDS, a loop without bounds checks for whole tiles. On the
+  engine's shapes (4,096 columns, 900 to 1,400 keys a block, two KV heads of 256) they reach 5.4 TFLOPS for the
+  scores and 6.3 to 6.6 for the values, against hipBLAS SGEMM's 4.5 and 5.0 (the card's peak is 9.75).
+
+Both apply to a q8_0 cache for K and V and a score scratch four times the grouped queries' room (`=2` also to
+heads of a multiple of 32 values); anything else runs the default path unchanged. Unset, `0` and other values
+keep the default path, byte-identical to before. No extra VRAM: the scores, the weights and the grouped
+queries share the score scratch. Decode, `STRATA_FDEC` and the CUDA and SYCL builds are unaffected (the code
+is compiled only under HIP). Set it before starting the engine.
+
+Measured on an RX 5700 XT 8 GB, Windows, with the engine's buffers (512 tokens a chunk, 16 query heads, two KV
+heads of 256, q8_0 cache): `attend_batch()` for 512 tokens, one layer (the model has ten), default / `=1` /
+`=2`: at 30,000 keys 83.4 / 61.5 / 50.9 ms, at 100,000 keys 277 / 204 / 169 ms (1.36x and 1.64x). On a replay
+of a recorded agentic session (8 requests at 90K to 112K tokens of context, Cyber-Tiel-Coder-35B-A3B
+UD-Q4_K_XL, MTP on) the engine read new prompt tokens at 122 / 145 / 159 tokens/s and a cold 90K prompt at
+216 / 247 / 266; decode speed was unchanged (37.4 / 37.5 / 38.6 tokens/s, within the noise of the runs). A
+needle test (a code word in 54K tokens, three rounds) found it every time with both.
+
+What was not tested: any card but gfx1010, CUDA and SYCL builds (the new kernels are compiled only under HIP),
+other cache formats (an FP16 cache runs the default path) and text quality beyond the FP64 comparison above.
+`poly_hip_prefill_fp32_test` (32 checks, about 10 s, needs a card; exits 77 without one) compares both levels
+with an FP64 reference and the default path at several lengths and chunk sizes, for heads of 64, 128 and 256,
+and checks the fallbacks.
+
+### strata-poly: size-class MMQ launches for staged experts
+
+While a prompt is read, the experts that are not in VRAM are copied through the staging buffer and multiplied by
+llama.cpp's quantized matrix kernels (MMQ), the experts of a round in one launch. That launch takes its tile
+width, the number of rows of a tile, from its largest expert (`mul_mat_q_switch_J`), and a tile computes all of
+its columns whatever rows are in them. A prompt batch spreads its rows unevenly: on the RX 5700 XT run below
+the median staged expert had 15 rows and the largest 463, so every launch used the widest tile (64) and only 43%
+of the columns it computed held a row.
+
+`STRATA_POLY_STAGED_TILES=8,16,32` puts the experts of a round in size classes (up to 8 rows, up to 16, up to
+32, more) and makes one launch for each class that has rows, so that each uses the tile its experts need. The
+numbers are ascending row counts, at most 7 of them. Unset, empty or invalid (a message is printed) keeps the
+single launch. The setting is read when the engine starts, so restart to change it, and it can be set in the
+server model's `env` map. A round's rows lie class after class, and each class has its own bounds in which the
+other classes' experts have no rows, as the cached experts' classes already do. A row's products are then
+the single launch's to the bit on a card whose MMQ does not use stream-k (AMD RDNA and GCN, NVIDIA Pascal). On
+one that does (NVIDIA from Volta, AMD CDNA) stream-k shares a tile's sum between blocks by the launch's tile
+count, so the class launches add the same parts in another order and agree within rounding: on an RTX PRO 6000
+the rows differed in the last bit or two, and a 256-token Qwen3.6 answer to a 32K prompt (experts frozen)
+left the single launch's at token 180. `poly_mmq_tiles_test` checks the first to the bit and the second within rounding. The
+tables grow by
+`2 x 8 x (2 x experts + 2)` integers (33 KB for 256 experts), allocated whether or not it is set. Experts already in VRAM keep
+their own classes.
+
+Measured on an RX 5700 XT 8 GB (gfx1010), Windows, Tiel Coder 35B-A3B UD-Q4_K_XL, `--kv q8_0`,
+`--vram-reserve-mib 384`, a cold prompt of 18,932 tokens (the repository's docs text), one engine start for
+each run, tokens/s of the prompt read:
+
+| `STRATA_POLY_STAGED_TILES` | run 1 | run 2 |
+|---|---|---|
+| unset | 246.9 | 248.5 |
+| `8,16,32` | 272.8 | 270.9 |
+| `4,8,16,32` | 274.4 | |
+
+That is +10%. On the same card with the engine's other gfx1010 changes (not in this tree: the SDWA int8 dot
+product, the FP32 prompt attention) the prompt read of 77,136 tokens went from 297 to 339 tokens/s (+14%) and
+of 18,932 tokens from 390 to 471 (+21%): the staged experts' launches are a larger share of the prompt there.
+More classes than `8,16,32` gained nothing measurable. The gain depends on how unevenly the rows fall, so on the
+number of tokens in a batch, the number of experts, how many are cached in VRAM and the card's tile table; a
+card with a different MMQ tile table (`mmq-config-*.cuh`) may gain more, less or nothing. Only gfx1010 was
+measured.
+
+### strata-poly: NVFP4 GGUFs
+
+strata-poly reads GGUFs whose matrices are llama.cpp's NVFP4 type (40): 64 values a block, E2M1 codes with a UE4M3
+scale for every 16. A file converted from NVIDIA's ModelOpt checkpoints also has each matrix's global scale beside
+it, `<name>.scale` for `<name>.weight`: one value, or one per expert for the routed experts. They are about 1e-4,
+too small for the blocks' E4M3 scales, and llama.cpp multiplies the product by them.
+
+- Decode: the kernels the Qwen3.8 engine decodes NVFP4 with (`iq_mmvq`, `vec_dot_nvfp4_q8_1`): the weights times
+  Q8_1 rows. `native_mmvq()` hands type 40 to them.
+- Prompt: llama.cpp's MMQ tiles. On every card they are W4A8 by default, the precision decode runs at
+  (`src/poly/mmq_nvfp4.cu`, built the way `mmq_nvfp4_w4a8.cu` above is). On an RTX 50 card (sm_120),
+  `STRATA_PREFILL_NVFP4=w4a4` takes llama.cpp's FP4 x FP4 tiles on its FP4 tensor cores instead: the instance is built
+  for 12.0a beside MXFP4's, and the rows' per-row float scale goes behind their FP4 blocks.
+- CPU experts: ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`.
+- Global scales: a dense matrix's on its product (`Engine::lin()`). A routed expert's gate and up scales go on their
+  products before the activation (`ExpertScales`, in each path's SwiGLU), and its down scale on its weight in the
+  token's sum. Down's scale on the hidden instead would leave it near 1e-5 before its 8-bit quantization (see "Where
+  the global scales go"). Only an NVFP4 tensor's `.scale` is read: Gemma 4's `ffn_down_exps.scale` is its own.
+- Not built: Metal (no NVFP4 kernels); HIP (no NVFP4 prompt product, the batch goes through the decode kernels; not
+  run here).
+
+Measured on lab-pro6000 (RTX PRO 6000 Blackwell Server Edition, sm_120, other users' jobs on the same card), with
+`WhiskyAKM/LFM2.5-24B-A2B-NVFP4-GGUF` (every matrix NVFP4, no global scales).
+
+`poly_expert_parity`: every product against a double-precision one over ggml's dequantized weights. All of them
+quantize their input to 8 bits, the Q6_K embedding of the same file included:
+
+| | relative error |
+| --- | ---: |
+| Q6_K embedding, decode and W4A8 MMQ | 1.23% |
+| NVFP4 matrices, decode kernel | 1.13-1.16% |
+| NVFP4 matrices, W4A8 MMQ | 1.13-1.16% |
+| NVFP4 experts (gate, up, SwiGLU, down), card and CPU | 1.7% |
+| NVFP4 matrices, W4A4 MMQ | 8.7-9.1% |
+
+The first 64 tokens after a 1,500-token prompt (the docs), teacher-forced on llama.cpp's greedy answer, against
+llama.cpp on the CPU (ggml 0.27). The answer's tokens are uncertain here (the first one at 9%), so the KL is larger
+than on a chat answer:
+
+| | same top token | mean KL |
+| --- | ---: | ---: |
+| strata-poly, W4A8 (default) | 56/64 | 0.054 |
+| strata-poly, experts on the CPU | 57/64 | 0.053 |
+| strata-poly, prompt through the decode kernels (`--prompt-batch 1`) | 59/64 | 0.056 |
+| strata-poly, W4A4 | 55/64 | 0.142 |
+| llama.cpp on the GPU (its prompt is FP4 x FP4 on this card) | 54/64 | 0.151 |
+
+Speed, every expert in VRAM, n-gram lookup off: a 7,500-token prompt 15,300 tokens/s with W4A8 and 16,900 with W4A4
+(+10%); 1,500 tokens 6,700 and 8,700-9,800. Decode is the same 411 tokens/s with either, since only the prompt's
+products change.
+
+`michaelw9999/Qwen3.6-35B-A3B-NVFP4-MTP-HQ` has global scales: NVFP4 experts, attention and `ssm_out`, an NVFP4 MTP
+layer, Q4_K ups in some layers, BF16 shared experts. Its whole experts come out at 1.6-2.0% in `poly_expert_parity`.
+The same 64 tokens against llama.cpp on the CPU (the answer is certain here, the first token at 99%):
+
+| | same top token | mean KL |
+| --- | ---: | ---: |
+| strata-poly, W4A8 (default) | 64/64 | 0.0015 |
+| strata-poly, experts on the CPU | 62/64 | 0.0019 |
+| strata-poly, prompt through the decode kernels | 63/64 | 0.0021 |
+| strata-poly, W4A4 | 62/64 | 0.0042 |
+| for comparison: UD-Q4_K_M, strata-poly against llama.cpp on the CPU | 64/64 | 0.0015 |
+
+llama.cpp at the pinned commit refuses this file: the 22 tensors of the MTP layer's scales are never read, and it
+counts that as an error. The reference here is that commit with the check off; it does not run the MTP layer.
+
+Its speed, on a card other jobs were using (single runs of the same setting differed by up to 2x; best of five):
+
+| Qwen3.6 | VRAM it may take | experts in VRAM | 7,500-token prompt | decode, 128 tokens |
+| --- | --- | ---: | ---: | ---: |
+| NVFP4-MTP-HQ, W4A8 | 28 GB (all of it) | 10,496 | 5,596 tokens/s | 274-295 tokens/s |
+| NVFP4-MTP-HQ, W4A4 | 28 GB | 10,496 | 5,590 | 294-303 |
+| UD-Q4_K_M | 28 GB | 10,496 | 5,976 | 304 |
+| NVFP4-MTP-HQ, W4A8 | 12 GB | 5,256 | 2,436 | 57-79 |
+| UD-Q4_K_M | 12 GB | 4,650 | 1,605 | 52-60 |
+
+W4A4 gains nothing measurable on Qwen3.6 and 10% on LFM2.5 (best of five: 15,232 and 16,785 tokens/s), at 2.6-2.8
+times the KL. The file is 2.2 GB smaller than UD-Q4_K_M, so a card that cannot hold either keeps more of its experts.
+
+#### Tests
+
+- `poly_expert_parity MODEL.gguf`: strata-poly's NVFP4 products against ggml's dequantized weights (with
+  `STRATA_PREFILL_NVFP4=w4a4` the MMQ ones are W4A4, and fail its bar, as above).
+- `nvfp4_expert_gpu_parity`: the decode kernels against ggml's reference.
+- `nvfp4_avx512_parity`: the CPU rows against ggml-cpu (with `--expert`: one whole expert).
+- `mmq_nvfp4_parity`: the prompt path's products against FP64 (with `--real`: rows dumped by `STRATA_DUMP_MOE_INPUT`).
+- `tools/nvfp4_verify.py` and `tools/nvfp4_verify_gguf.py`: the conversion, bit for bit.
 
 ## Adding a model of an architecture that is there
 

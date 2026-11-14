@@ -96,6 +96,8 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
             setup.mark(dst)
 
         patches = [
+            # These fixtures describe PCs, even when the test runner is a Mac.
+            mock.patch.object(setup.sys, "platform", "win32" if setup.WIN else "linux"),
             mock.patch.object(setup, "ROOT", t),
             mock.patch.object(setup, "GPU_PICK", None),
             mock.patch.object(setup, "data_folder", lambda d, *a, **k: (t / "data", [])),
