@@ -189,5 +189,18 @@ class Golden(unittest.TestCase):
         self.check(OutputParser, GOLDEN["xml"])
 
 
+class ForkParserArguments(unittest.TestCase):
+    """The fork's Service._run passes call_format and opened to every parser class: a strata-poly model with a JSON
+    template (Flint's abliterated GGUF) got a TypeError, a 400 on every request and a failed `strata launch`."""
+
+    def test_json_parser_takes_the_fork_arguments(self):
+        p = JsonOutputParser(thinking=True, tools=GOLDEN["tools"], stream_tools=True, recover=False,
+                             declared_only=True, deferred=False, call_format="function", opened=True)
+        self.assertTrue(p.recover)
+        evs = p.feed("the reasoning</think>the answer") + p.finish()
+        self.assertEqual("".join(e.text for e in evs if e.kind == "reasoning"), "the reasoning")
+        self.assertEqual("".join(e.text for e in evs if e.kind == "content"), "the answer")
+
+
 if __name__ == "__main__":
     unittest.main()

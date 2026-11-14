@@ -2433,9 +2433,11 @@ class JsonOutputParser(OutputParser):
     not the server's tool_call_recovery is on.  Everything else (reasoning, code fences, declared-tool rules) is OutputParser's."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, declared_only: bool = False, deferred: bool = False):
+                 recover: bool = False, declared_only: bool = False, deferred: bool = False,
+                 call_format: str = "function", opened: bool = False):
+        # call_format / opened: the fork's strata-poly models (GLM, Gemma, LFM2 call forms; a prompt that ended on <think>)
         super().__init__(thinking=thinking, tools=tools, stream_tools=stream_tools, recover=True,
-                         declared_only=declared_only, deferred=deferred)
+                         declared_only=declared_only, deferred=deferred, call_format=call_format, opened=opened)
 
 
 def parser_for_template(source: str | None):
