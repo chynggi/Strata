@@ -9460,9 +9460,9 @@ def build_engine_poly(gpu, yes, llama, vision="none", toolkit=13, portable=False
 
 def build_engine_poly_hip(gpu, llama, portable=False) -> Path:
     """Compile strata-poly for this AMD GPU into engine-poly/ (again only when its source changed: a `git pull`).
-    Windows: AMD's TheRock Windows wheels in .rocm-win (build_engine_poly_hip_win; portable: see that function).  Linux: ROCm from rocm_root: a
-    system ROCm 7 or AMD's TheRock wheels in .venv, as for the main engine's HIP build.  There is no ready-made AMD
-    engine and no HIP image encoder: images stay off."""
+    Windows: AMD's TheRock Windows wheels in .rocm-win (build_engine_poly_hip_win; portable: see that function).
+    Linux: ROCm from rocm_root: a system ROCm 7 or AMD's TheRock wheels in .venv, as for the main engine's HIP
+    build.  There is no ready-made AMD engine and no HIP image encoder: images stay off."""
     if WIN:
         return build_engine_poly_hip_win(gpu, llama, portable)
     eng = ROOT / ENGINE_POLY_DIR

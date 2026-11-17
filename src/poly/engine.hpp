@@ -94,7 +94,7 @@ struct Options {
                                   ///< Where ram_experts_mib is not set (below -1), the experts outside VRAM that the
                                   ///< CPU holds get what the machine has available at the load less this: all of
                                   ///< them when they fit in it, else a budget as ram_experts_mib's.  A ram_experts_mib
-                                  ///< that is set wins.
+                                  ///< that is set, or lock_experts, wins.
     bool lock_experts = false;    ///< the experts outside VRAM locked into RAM, so the system cannot drop them from
                                   ///< the file cache when another program wants the memory (Linux: up to ulimit -l)
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts

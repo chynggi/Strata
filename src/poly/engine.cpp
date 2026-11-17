@@ -2818,7 +2818,7 @@ void Engine::load(const Options& o) {
     // --ram-keep-gib W: the RAM the person wants left for their own work.  An explicit --ram-experts-mib wins; else the
     // experts the CPU holds get what is available now less W, and nothing is held back when they all fit in that
     // (then -1, so the default's own budget below does not hold them back either).
-    if (opt_.ram_keep_gib > 0 && opt_.ram_experts_mib < -1) {
+    if (opt_.ram_keep_gib > 0 && opt_.ram_experts_mib < -1 && !opt_.lock_experts) {
         const size_t avail = ram_available();
         const size_t keep = (size_t) (opt_.ram_keep_gib * (double) (1ULL << 30));
         if (avail == 0) {
@@ -2840,6 +2840,7 @@ void Engine::load(const Options& o) {
                              (double) outside_bytes_ / (1 << 30), (long long) opt_.ram_experts_mib);
             }
         }
+        if (opt_.ram_experts_mib < -1) opt_.ram_experts_mib = -1;   // --ram-keep-gib decided: all of them in RAM
     }
     // Options::ram_experts_mib below -1, the default: every expert outside VRAM in RAM when they fit in what is free,
     // with kRamHeadroom left for the rest of the process; else a budget of what is free less that.  Through the

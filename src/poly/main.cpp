@@ -1195,7 +1195,7 @@ void usage() {
                  "  --ram-keep-gib W       RAM to leave available for your own work, in GiB (default 0 = none; the\n"
                  "                         environment's STRATA_RAM_KEEP_GIB is the same, the flag wins): the experts\n"
                  "                         outside VRAM get the RAM available at the load less W, as --ram-experts-mib\n"
-                 "                         would, or all of it when they fit; --ram-experts-mib set wins\n"
+                 "                         would, or all of it when they fit; --ram-experts-mib or --lock-experts wins\n"
                  "  --lock-experts         lock the experts outside VRAM in RAM, so the system cannot drop them from the\n"
                  "                         file cache when other programs want the memory (Linux: up to ulimit -l)\n"
                  "  --prompt-batch N       prompt tokens read at a time (default 1024); about 1.4 MiB of VRAM each\n"
