@@ -19,6 +19,10 @@ a `--serve` engine, with a layer split, with helper caches on other GPUs, with a
 (`--vram-elastic is off: the driver or this GPU offers no virtual memory management`) **(code; not run on such a driver)**.
 Without the flag nothing changes: the same answers as without it.
 
+This page is about the Strata project's engine (Qwen3.8). strata-poly, the engine of the models PolyStrata adds, has no flag for
+it: its expert cache takes `POST /v1/vram` as it is, and the server does not pass the config's `"vram_elastic"` on to
+it (strata-poly ends at an option it does not know). A reserve of 0 leaves strata-poly its smallest one, 256 MiB.
+
 ## The request
 
 ```
@@ -119,6 +123,9 @@ off by default: there is no shrinking expert cache on HIP, so the reader's room 
 UD-Q4_K_XL: 7,959 slots on demand, 7,943 with the reader on the card, 8,411 with the CPU reader), and the first picture after a start takes 5 s longer (the HIP reader starts
 in 4.9 s, 1,480 MiB). It releases its VRAM when idle (30,585 to 32,098 MiB while it runs, back to 30,618 after 120 s). `"elastic": true` in the vision section asks for it. Not by default with a layer split, batch slots,
 `--kv-grow` or `--peer-device`.
+
+With strata-poly a GPU encoder starts with the model whatever `"elastic"` says, and the server says so: the turns
+below ask for a reserve of 0, which strata-poly reads another way (above). Its CPU encoder is on demand as here.
 
 With `"vram_elastic": true` as well (opt-in) the expert cache gives the room instead of the reserve:
 

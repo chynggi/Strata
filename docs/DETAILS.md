@@ -1008,6 +1008,18 @@ them. The app, `strata launch` and setup use one rule for the reader:
 | 24 GB or more | The card's reader, started by the first picture and stopped after 120 s without one (NVIDIA, one GPU) | 0.1-0.5 s per picture (up to 1,024 image tokens) once it runs, 1.2-1.4 s more for the first picture after a stop. It holds about 1.3 GB of VRAM only while pictures are being read; a start with no room is read on the CPU. On AMD, Intel and a Mac the reader stays on the card as before. |
 | Mac | The GPU (Metal) | Whatever its memory. |
 
+**A largest picture size (opt-in):** `"max_size": [W, H]` (or `"WxH"`) in the `"vision"` section scales a picture
+larger than that box down to fit it before the encoder reads it. The box fits either way round: a picture's long side
+must fit the box's long side and its short side the short one, so `[2560, 1440]` takes a 3840x2160 screenshot to
+2560x1440, a 1440x3200 phone screenshot to 1152x2560 and a 3440x1440 ultrawide one to 2560x1072. The aspect ratio is
+kept, the scaling is Pillow's Lanczos, and the result goes to the encoder as a PNG. A picture that fits, and every
+picture when the key is not set, goes through as before. mtmd's `max_tokens` is a pixel budget instead (32x32 pixels
+a token for Qwen-VL), so a box of W x H wants `"max_tokens"` of at least W x H / 1024 (3,600 for 2560x1440), or the
+encoder scales the picture down again. Without Pillow the key does nothing. Measured with Tiel Coder 35B-A3B's BF16
+encoder on an i9-9980HK, 8 threads: 2560x1440 (3,600 tokens) encodes in about 138 s, 1920x1080 (2,040) in about
+52 s and 800x450 in about 5 s. The same picture sent again, as an agent does with its history, takes about 1 s,
+because the encoder's cache and the conversation cache both hold it.
+
 Switch pictures off with `--vision no` (or "No" in the app and `strata launch`), or pick the reader with `--vision gpu` or
 `--vision cpu`. Setup downloads the encoder and puts a small helper (`strata-vision`, from llama.cpp's `mtmd` library) beside
 the engine. Where no reader exists, pictures stay off and the screen says so (the Intel Arc engine has none yet). On AMD the

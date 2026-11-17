@@ -32,6 +32,21 @@ class Busy(unittest.TestCase):
         finally:
             Path(name).unlink()
 
+    def test_an_encoder_that_ends_silently_shows_the_log_tail(self):
+        # PolyStrata issue 162: it printed nothing on stdout, so the message ended at the colon.  Upstream's message
+        # (vision_start_error) says so and quotes the log's last lines; it does not name the log file.
+        with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+            f.write("engine line\n\nstrata-vision: error while loading shared libraries: libcudart.so.12\n")
+            name = f.name
+        try:
+            with open(name, "a") as log:
+                m = server.vision_start_error("", log)
+            self.assertIn("ended without saying anything", m)
+            self.assertIn("libcudart.so.12", m)
+        finally:
+            Path(name).unlink()
+        self.assertIn("ended without saying anything", server.vision_start_error(""))
+
     def test_other_failures_are_unchanged(self):
         self.assertEqual(server.vision_start_error("ERR no mmproj\n"), "the vision encoder did not start: ERR no mmproj")
 
