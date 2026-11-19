@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+if (ROOT / "terminal").is_dir():
+    ROOT = ROOT / "terminal"
 WIN = sys.platform == "win32"
 NAME = re.compile(r"^run-(.+)-(vision|novision)\.(bat|sh)$")
 

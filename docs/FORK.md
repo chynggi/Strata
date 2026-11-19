@@ -21,6 +21,18 @@ Fork-only files (upstream has none of these, so they never conflict): `docs/FORK
 `scripts/merge-upstream.sh`, `scripts/merge-upstream.ps1`, `tools/test_fork_mcp.py`,
 `tools/test_fork_setup.py`, `apps/host/tests/fork-catalog.test.mjs`, `MoreSimpleStart.*`.
 
+## Strata 0.2.16 and PolyStrata 0.1.45-poly.10
+
+Upstream `58ee32277` moves the app, Terminal and engine to `app/`, `terminal/` and `engine/`.
+The default engine and picture reader use Strata’s own kernels. Setup builds `strata-poly` with
+`STRATA_BUILD_POLY=ON` and `STRATA_GGML_DIR` pointing to a full llama.cpp checkout. Its optional
+image encoder uses mtmd through `STRATA_VISION_POLY=ON` in a separate build directory.
+
+The PolyStrata delta `7a6c09836..3e1642161` adds session files and pinned warm starts, per-model
+KV formats, Qwen3.6 scratch reuse, a layer-split VRAM pool, the Linux ROCm mapping wait, and an
+updated LFM2.5 pin. The fork retains upstream’s hardware matrix and Metal, and omits the PolyStrata
+benchmark submissions, gfx1012 setup opt-in and Clang gather setting.
+
 ## Keeping merges small
 
 The fork touches only the files above. Everything else is upstream's; do not edit it locally without a
