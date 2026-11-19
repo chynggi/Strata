@@ -20,9 +20,14 @@ SLOWER = "may run slower"
 #   nvfp4 NVFP4-QAD: its 102.2 GB download is NVIDIA's checkpoint, which this PC converts into the pack that runs; the files that run are the converted pack, the same
 #     size as the other NVFP4 sets (128.0 - 51.2 = 76.8 GB), so that figure is used (owner's rule: the model files that run, minus the table)
 #   gyro: the table is inside the one GGUF; the catalog states the rest (its `ram_gb`: 27.6 / 35 GB), the table is the difference
+#   orca / mrad / rvn (the fork's uncensored GGUFs): the same IQ4_NL table, inside the model file (per_layer_token_embd.weight [160, 320001536], 28,800,138,240
+#     bytes, read from the GGUF headers at HF_REVISIONS' commits of orca IQ2_M / IQ3_XXS, mrad IQ3_S and rvn IQ3_XS shard 2; the GSQ-RCO shard is that tensor
+#     plus its 192-byte header)
 #   qwen36 (its own path) has none.  A family this module does not know counts its whole download.
 _GB = 1e9
-_TABLE_BYTES = {"qwen": 28_800_138_432, "swift": 28_800_138_432, "coder": 28_800_138_432, "unsloth": 28_800_138_432, "nvfp4": 51_200_246_176}
+_FORK_PLE_BYTES = 28_800_138_240
+_TABLE_BYTES = {"qwen": 28_800_138_432, "swift": 28_800_138_432, "coder": 28_800_138_432, "unsloth": 28_800_138_432, "nvfp4": 51_200_246_176,
+                "orca": _FORK_PLE_BYTES, "mrad": _FORK_PLE_BYTES, "rvn": _FORK_PLE_BYTES}
 _BIG_UNSLOTH = ("UD-Q5_K_XL", "UD-Q6_K_XL", "Q8_0")
 _BIG_TABLE_BYTES = 54_400_261_312
 _PACK_GB = {("nvfp4", "NVFP4-QAD"): 76.8}        # sets whose download is not the files that run: the size of what runs
