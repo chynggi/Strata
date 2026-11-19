@@ -144,3 +144,4 @@ node_modules/
 /terminal/third_party/llama.cpp-*/
 /terminal/third_party/llama.cpp-*.zip
 /terminal/strata-*.warm-start*
+/third_party/llama.cpp*

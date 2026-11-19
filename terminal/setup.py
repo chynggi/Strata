@@ -4665,9 +4665,16 @@ def get_llama_cpp(vision=False):
     if vision and VISION_LLAMA_CPP_COMMIT == LLAMA_CPP_COMMIT:
         vision = False
     commit = VISION_LLAMA_CPP_COMMIT if vision else LLAMA_CPP_COMMIT
-    llama = home() / "third_party" / (f"llama.cpp-{commit[:7]}" if vision else "llama.cpp")
-    if (llama / "ggml" / "CMakeLists.txt").exists() and (llama / "gguf-py").is_dir():
-        return llama
+    name = f"llama.cpp-{commit[:7]}" if vision else "llama.cpp"
+    llama = home() / "third_party" / name
+    candidates = [llama]
+    if not vision and (override := llama_override()) is not None:
+        candidates.insert(0, override)
+    if ROOT.name == "terminal":
+        candidates.append(ROOT.parent / "third_party" / name)
+    for candidate in candidates:
+        if (candidate / "ggml" / "CMakeLists.txt").is_file() and (candidate / "gguf-py").is_dir():
+            return candidate
     z = home() / "third_party" / f"llama.cpp-{commit[:7]}.zip"
     download(VISION_LLAMA_CPP_ZIP if vision else LLAMA_CPP_ZIP, z, "llama.cpp source")
     tmp = home() / "third_party" / "_unpack"

@@ -5,7 +5,7 @@ the name setup.py asks the latest release for (poly_asset()), which carries the 
 
 Run it on a clean checkout of the commit the release is made from, with setup's Python:
 
-    .venv\\Scripts\\python.exe tools\\make_poly_release.py OUT_DIR
+    terminal\\.venv\\Scripts\\python.exe tools\\make_poly_release.py OUT_DIR
 
 and upload OUT_DIR\\strata-poly-windows-x64-<source>.zip to that release.  setup.py checks the download against the
 SHA-256 GitHub publishes for the asset.  The build folders stay in OUT_DIR, so a second run compiles what changed."""
@@ -17,7 +17,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "terminal"))
 import setup  # noqa: E402
 
 ARCHS = [75, 80, 86, 89, 120]   # RTX 20, A100 and A-series, RTX 30, RTX 40, RTX 50
@@ -29,7 +29,9 @@ def main() -> int:
     out = Path(sys.argv[1]).resolve()
     # the hash covers every file under these paths, so a file git does not have would name a source no clone has
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--ignored", "--",
-                            *setup.ENGINE_SOURCES, *setup.VISION_SOURCES], capture_output=True, text=True).stdout
+                            *(f"engine/{p}" for p in setup.ENGINE_SOURCES),
+                            *(f"terminal/{p}" if p.startswith("tools/") else f"engine/{p}"
+                              for p in setup.VISION_SOURCES)], capture_output=True, text=True).stdout
     if dirty.strip():
         sys.exit("the engine sources are not those of a commit:\n" + dirty)
     nvcc, cuda_v = setup.find_nvcc()
@@ -42,9 +44,11 @@ def main() -> int:
     poly, vis = out / "build-poly", out / "build-vision"   # GBs of CUDA objects for five cards: on OUT_DIR's disk
     for d in (poly, vis):
         d.mkdir(parents=True, exist_ok=True)
-    setup.cmake_build(ROOT, poly, "strata-poly", ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
+    setup.cmake_build(setup.engine_src(), poly, "strata-poly", ["-DSTRATA_BUILD_POLY=ON", "-DSTRATA_ENABLE_CUDA=ON",
+                                                  "-DSTRATA_BUILD_TESTS=OFF",
                                                   f"-DSTRATA_GGML_DIR={llama}", *defs], vcvars, poly / "build.bat")
-    setup.cmake_build(ROOT / "tools" / "vision", vis, "strata-vision", [f"-DLLAMA_DIR={setup.get_llama_cpp(vision=True)}",
+    setup.cmake_build(setup.ROOT / "tools" / "vision", vis, "strata-vision",
+                      ["-DSTRATA_VISION_POLY=ON", f"-DLLAMA_DIR={setup.get_llama_cpp(vision=True)}",
                                                                         "-DSTRATA_VISION_CUDA=ON", *defs],
                       vcvars, vis / "build.bat")
     src = setup.source_hash(setup.ENGINE_SOURCES)
