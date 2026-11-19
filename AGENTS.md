@@ -23,6 +23,66 @@ Strata has three parts:
   `START-HERE.bat` or `setup.sh`, is setup from a source checkout, for developers. The release paths are the
   installer and `strata launch`.
 
+## 포크 전용: 소스에서 엔진을 빌드하는 지침
+
+Use this section when asked to build or rebuild an engine from source. The request is for a
+binary built on the specified machine. Use the fork checkout on that machine and record its
+path, branch and full commit (`git status --short --branch`, `git rev-parse HEAD`). Check the
+target GPU and the installed compiler, toolkit and CMake before choosing build flags. If the
+request names a model or config, check its engine executable to choose the target. Keep the
+working tree and existing builds intact.
+
+Build directly with CMake from the checkout root. CMake sources are in `engine/` since 0.2.16.
+Use a separate build directory for each engine, toolkit and backend. On Windows with CUDA,
+run from an x64 Visual Studio developer shell with the matching MSVC and CUDA toolkit.
+The commands below use Ninja and `native` for a build on the target NVIDIA machine. Use an
+explicit `CMAKE_CUDA_ARCHITECTURES` value for a build meant for another GPU. Quote each
+`-Dkey=value` argument that contains spaces or semicolons.
+
+- **Strata (`strata`).** Keep the default own-stack build. Leave `STRATA_BUILD_POLY` off and
+  leave `STRATA_GGML_DIR` unset. Use the fork's source even for this target.
+
+  ```sh
+  cmake -S engine -B build-strata-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=native
+  cmake --build build-strata-cuda --target strata
+  ```
+
+- **Poly (`strata-poly`).** Enable `STRATA_BUILD_POLY` and pass a compatible full llama.cpp
+  checkout as `STRATA_GGML_DIR`. Use an existing compatible checkout on the machine when
+  available. For a new dependency checkout, use `LLAMA_CPP_COMMIT` from this revision's
+  [terminal/setup.py](terminal/setup.py). The path is the llama.cpp root and must contain
+  `ggml/src/ggml-cuda/template-instances/mmq-instance-q4_0.cu`. The vendored
+  `engine/third_party/strata-ggml` subset lacks the MMQ sources Poly needs.
+
+  ```sh
+  cmake -S engine -B build-poly-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=native -DSTRATA_BUILD_POLY=ON "-DSTRATA_GGML_DIR=/path/to/llama.cpp"
+  cmake --build build-poly-cuda --target strata-poly
+  ```
+
+- **Other backends.** Follow [HIP](docs/AMD_HIP.md), [SYCL](docs/INTEL_ARC.md), or
+  [Metal](docs/MAC.md) for Strata. Poly supports CUDA and wave32 HIP in this fork. For Poly
+  on HIP, use the matching HIP toolchain and GPU architecture, keep both Poly flags above,
+  and build the `strata-poly` target. Use `build_engine_poly_hip` and
+  `build_engine_poly_hip_win` in [terminal/setup.py](terminal/setup.py) as the reference for
+  toolchain flags.
+- **Vision.** Build `strata-vision` separately from `terminal/tools/vision` when requested.
+  The default reader uses Strata's own vision code. For Poly's reader, configure its own
+  build directory with `-DSTRATA_VISION_POLY=ON` and `-DLLAMA_DIR=<llama.cpp root>`. Use the
+  compatible revision named by `VISION_LLAMA_CPP_COMMIT` for a new checkout. These builds
+  produce binaries with the same filename. Keep their output paths distinct.
+
+For an engine-only request, stop after building and checking the produced binary. Leave
+installers, `START-HERE.bat`, `setup.sh`, and `strata launch` for setup requests. Those
+flows can download release engines or models and write run configs. Deploy, replace an
+installed engine, or restart a server only when the request includes that work. After
+deployment, check the executable path in the run config.
+
+Check the configure and build exit codes, locate the artifact in the selected build
+directory, and invoke it by full path. Use `--version` for `strata` and `strata-vision`.
+`strata-poly --help` prints usage and returns 2, so check the output as well as the exit
+code. Report the machine, source commit, target, backend, GPU architecture, artifact path
+and smoke-check result. Report model loading and inference only if they were run.
+
 ## Installing Strata for a user
 
 Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For a user who wants the desktop app, send them to the installer
