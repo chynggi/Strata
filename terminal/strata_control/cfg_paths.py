@@ -16,6 +16,11 @@ One resolver, used by both sides:
 Only paths in Strata's own folders are touched (``components/control``, ``components/engine``), and only when the version folder they
 name is GONE; a path the person typed themselves, a model or pack folder, or a version folder that still exists is left exactly as it is.  A path whose
 file is nowhere in the current version either is not guessed: ``unresolved`` names it.
+
+The same goes for a source clone pulled to the 0.2.16 layout: the Terminal's files moved from the clone's root into ``<clone>/terminal``
+(``<clone>/data/...`` is ``<clone>/terminal/data/...`` now).  setup's move_over_old_layout rewrites the run configs inside the clone; a config
+or launch preset elsewhere (``%LOCALAPPDATA%/Strata/launch``) still named the old place, and its engine stopped at "cannot open" (a control
+vector the person had chosen).  Such a path is pointed at ``terminal/`` only when the old file is gone and the new one is there.
 """
 from __future__ import annotations
 
@@ -84,13 +89,71 @@ def resolve_path(value: str) -> tuple[str, bool] | None:
     return (str(new), True) if new.exists() else (value, False)
 
 
+#: the Terminal's own entries that 0.2.16 moved from a source clone's root into <clone>/terminal (setup.py TERMINAL_ENTRIES)
+LAYOUT_ENTRIES = frozenset({"strata.py", "setup.py", "serve", "strata_cli", "strata_control", "tools", "data", "ref", "bin"})
+#: a trailing ":<scale>" (``--control-vector-scaled <file>:1.0``): kept as it is, the file before it is what is looked up
+_SCALE = re.compile(r"^(?P<path>.+?)(?P<scale>:[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)?$", re.S)
+
+
+def _is_clone(root: Path) -> bool:
+    try:
+        return (root / "terminal" / "setup.py").is_file() and (root / "engine" / "CMakeLists.txt").is_file()
+    except OSError:
+        return False
+
+
+def resolve_layout_path(value: str) -> str | None:
+    """For a string that names a missing file at a source clone's root that 0.2.16 moved into ``<clone>/terminal`` (``<clone>/data/...``,
+    ``<clone>/tools/...``): the same file in ``terminal/``, when it is there.  None otherwise (the path exists, is no such path, or the file is
+    in neither place: nothing is guessed).  A ``:<scale>`` after the file (a scaled control vector) is kept."""
+    if not isinstance(value, str) or len(value) < 8 or "\n" in value:
+        return None
+    m = _SCALE.match(value)
+    if not m:
+        return None
+    path, scale = m["path"], m["scale"] or ""
+    p = Path(path)
+    if not p.is_absolute():
+        return None
+    try:
+        if os.path.exists(value) or os.path.exists(path):
+            return None
+    except OSError:
+        return None
+    for root in p.parents:
+        try:
+            rel = p.relative_to(root)
+        except ValueError:
+            continue
+        if not rel.parts or rel.parts[0] not in LAYOUT_ENTRIES:
+            continue
+        if _is_clone(root):
+            new = root / "terminal" / rel
+            return str(new) + scale if new.exists() else None
+    return None
+
+
+def resolve_value(value):
+    """``value`` with a removed version folder of Strata's own, or a clone path of the layout before 0.2.16, pointed at where the file is now;
+    unchanged otherwise.  For values that are no run config (a launch preset's extra options)."""
+    res = resolve_path(value) if isinstance(value, str) else None
+    if res is not None and res[1]:
+        return res[0]
+    moved = resolve_layout_path(value) if isinstance(value, str) else None
+    return value if moved is None else moved
+
+
 def _walk(obj, found: list, lost: list, key: str = ""):
     if isinstance(obj, str):
         if key in SKIP_KEYS:
             return obj
         res = resolve_path(obj)
         if res is None:
-            return obj
+            moved = resolve_layout_path(obj)                 # a source clone's root path of the layout before 0.2.16 (data/ -> terminal/data/)
+            if moved is None:
+                return obj
+            found.append((obj, moved))
+            return moved
         (found if res[1] else lost).append((obj, res[0]))
         return res[0]
     if isinstance(obj, list):

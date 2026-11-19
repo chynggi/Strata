@@ -100,6 +100,9 @@ def load(name: str, *, missing_ok: bool = False) -> LaunchSettings | None:
         raise PresetError(f"The saved preset '{name}' is damaged.")
     s = LaunchSettings.from_dict(data)
     s.name = s.name or name
+    if s.extra:                                              # a file of the layout before 0.2.16 or of a removed version folder: where it is now
+        from strata_control import cfg_paths
+        s.extra = {k: cfg_paths.resolve_value(v) for k, v in s.extra.items()}
     return s
 
 
