@@ -429,6 +429,13 @@ class OnRequest(unittest.TestCase):
         beta = body["data"][2]
         self.assertEqual((beta["meta"], beta["aliases"]), ({"n_ctx": 8192}, ["b2"]))
 
+    def test_switchable_models_are_presets(self):
+        """llama-server's router marks a model it loads on use "source": "preset"; Pi lists only those."""
+        self.svc.switch_on_request = True
+        body = self.call("/v1/models")[1]
+        self.assertEqual([(m["id"], m.get("source")) for m in body["data"]],
+                         [("alpha", None), ("a1", None), ("beta", "preset"), ("b2", "preset")])
+
     def test_a_request_naming_another_model_loads_it(self):
         self.svc.switch_on_request = True
         self.assertEqual(self.chat("beta"), (200, ("beta", "I am beta.")))

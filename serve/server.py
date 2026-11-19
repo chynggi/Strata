@@ -1146,8 +1146,11 @@ class StrataEngine:
 
     @property
     def disk_sessions(self) -> bool:
-        """SAVE / RESTORE: the Strata project's engine has them, strata-poly does not (issue 114)."""
-        return Path(str(self.spawn[0])).stem.lower() not in ("strata-poly", "strata-glm")
+        """SAVE / RESTORE: the Strata project's engine has them.  strata-poly says so in its INFO line (sessions=1);
+        one from before that, and strata-glm, answer them with a refusal (issue 114)."""
+        if Path(str(self.spawn[0])).stem.lower() not in ("strata-poly", "strata-glm"):
+            return True
+        return bool((self.info or {}).get("sessions"))
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0,
@@ -2999,7 +3002,9 @@ class StrataEngine:
             return self._session_file(action, path)
 
     def _session_file(self, action: str, path: str) -> dict:
-        """Disk sessions: `SAVE <path>` / `RESTORE <path>` between requests (the caller holds the service FIFO).
+        """Disk sessions: `SAVE <path>` / `RESTORE <path>` between requests (the caller holds the service FIFO), and
+        strata-poly's `PIN <path>` (action "pin": the file's conversation is kept beside the conversation cache, and a
+        prompt that starts with it goes on from there; Service.pin_start).
         -> {"tokens", "bytes", "ms"}.  SessionRefused (kind, published) when the engine refused or failed the file and
         is still in step (`SERR <kind> <0|1> <reason>`).  Any line this exchange does not allow - an unknown or
         malformed one, a bare ERR, an answer with negative counts or a non-finite time - means the two sides lost
@@ -3010,16 +3015,17 @@ class StrataEngine:
         a step that blocks in one call (a flush, the device transfer): until the next line the wait is that step's
         explicit allowance (at most SESSION_WAIT_MAX_S) when it is longer than engine_silence_s - no more, so a step
         that never ends is still ended."""
-        if action not in ("save", "restore") or any(c in path for c in "\r\n\0"):
+        send, want = {"save": ("SAVE", "SAVED"), "restore": ("RESTORE", "RESTORED"),
+                      "pin": ("PIN", "PINNED")}.get(action, ("", ""))
+        if not send or any(c in path for c in "\r\n\0"):
             raise ValueError("invalid session command")
         try:
-            self.proc.stdin.write(f"{'SAVE' if action == 'save' else 'RESTORE'} {path}\n")
+            self.proc.stdin.write(f"{send} {path}\n")
             self.proc.stdin.flush()
         except OSError:
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         silence = float(self.silence_s or 0)
         heard = time.monotonic()
-        want = "SAVED" if action == "save" else "RESTORED"
 
         def out_of_step(line: str) -> EngineDied:
             self.ended = True                               # not alive from now: the next request restarts it
@@ -5346,15 +5352,26 @@ class Service:
         config = Path(self.config_path)
         return config.with_name(config.stem + ".warm-start")
 
-    def keep_start(self, ids) -> None:
+    def keep_start(self, ids, seed: bool = False) -> None:
         """"warm_start": keep the prompt's first turn (the system prompt with the tools) for start_warm(), when it is
-        long and not the one kept already."""
+        long and not the one kept already.  A first turn that leaves the kept one after a long common start (a date
+        or a folder written near its end) keeps that common start: it is what the next chat begins with as well, and
+        the session file made of it (pin_start()) ends where a chat can go on from.  `seed`: the first turn is the
+        config's own ("warm_start": "FILE"); it replaces a kept start that is not a part of it."""
         opens = (i for i, t in enumerate(ids) if t in self.turn_ids)
         next(opens, None)
         end = next(opens, None)                         # the second turn's opener: the first turn ends there
-        if end is None or end < WARM_MIN_TOKENS or ids[:end] == self.warm_ids:
+        if end is None:
             return
-        self.warm_ids = ids[:end]
+        first, kept = ids[:end], self.warm_ids or []
+        same = len(os.path.commonprefix([kept, first]))
+        if seed and WARM_MIN_TOKENS <= same == len(kept):
+            return
+        if not seed and WARM_MIN_TOKENS <= same < end:
+            first = first[:same]
+        if len(first) < WARM_MIN_TOKENS or first == kept:
+            return
+        self.warm_ids = first
         path = self.warm_path()
         tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
         try:
@@ -5363,41 +5380,96 @@ class Service:
         except OSError as e:
             print(f"[strata] warm start: {path} could not be written ({e})", flush=True)
 
+    def pin_path(self) -> Path:
+        """The kept start as the engine saved it (a session file), next to warm_path().  The name says which start it
+        is: another start gets another file."""
+        path = self.warm_path()
+        return path.with_name(f"{path.name}-{hashlib.sha256(json.dumps(self.warm_ids).encode()).hexdigest()[:16]}.bin")
+
+    def pin_start(self, make: bool = False) -> bool:
+        """"warm_start" with an engine that pins (strata-poly's INFO pinned_tokens, one conversation at a time): the
+        kept start is pinned from its session file, and a chat that begins with it goes on from there whatever the
+        engine read in between.  `make`: the engine has just read the kept start (start_warm(): there was no file, or
+        the engine refused it - another engine version's, another model file's), and the file is written from that
+        first.  The caller holds self.fifo.  False: nothing is pinned, and requests read the start as before."""
+        info = getattr(self.engine, "info", None) or {}
+        if not self.warm_ids or "pinned_tokens" not in info or getattr(self.engine, "batch", False):
+            return False
+        path = self.pin_path()
+        try:
+            if make:
+                self.engine.session_file("save", str(path))
+                for old in path.parent.glob(f"{self.warm_path().name}-*.bin"):
+                    if old != path:                     # an earlier start's
+                        with contextlib.suppress(OSError):
+                            old.unlink()
+            elif not path.is_file():
+                return False
+            r = self.engine.session_file("pin", str(path))
+        except (SessionRefused, EngineDied, ValueError, OSError) as e:
+            print(f"[strata] warm start: the kept prompt start is not pinned from {path.name} ({e})", flush=True)
+            return False
+        print(f"[strata] warm start: the {r['tokens']}-token prompt start is pinned from {path.name} "
+              f"({r['bytes'] >> 20} MiB, {r['ms'] / 1000:.1f} s)", flush=True)
+        return True
+
     def start_warm(self) -> None:
         """"warm_start": read the prompt start keep_start() kept when the server ran last, so that the first request
         that starts with it again reads only what follows.  A request stops the read (run() sets warm_stop); the part
-        read stays cached."""
+        read stays cached.  An engine that pins takes the start from its session file instead (pin_start()), and
+        reads it only to write that file.  "warm_start": "FILE" names a chat request (messages and tools, as
+        /v1/chat/completions takes them) whose first turn is the start, for an installation that knows its agent's
+        system prompt before the first request."""
         if not self.warm_start or not self.loaded():
             return
         path = self.warm_path()
         try:
             ids = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return
+            ids = None
         except (OSError, ValueError) as e:
             print(f"[strata] warm start: {path} cannot be read ({e})", flush=True)
-            return
-        if not (isinstance(ids, list) and WARM_MIN_TOKENS <= len(ids) < self.engine.max_context and
+            ids = None
+        if ids is not None and not (
+                isinstance(ids, list) and WARM_MIN_TOKENS <= len(ids) < self.engine.max_context and
                 all(isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in ids)):
             print(f"[strata] warm start: {path} is not a kept prompt start; ignored", flush=True)
-            return
+            ids = None
         self.warm_ids = ids
+        if isinstance(self.warm_start, str):
+            seed = Path(self.config_path).parent / self.warm_start
+            try:
+                messages, tools, kwargs = openai_to_messages(json.loads(seed.read_text(encoding="utf-8-sig")))
+                self.keep_start(self.encode_prompt(messages, tools, kwargs, store=False), seed=True)
+            except FileNotFoundError:                   # the agent writes it later: a start without it, as before
+                print(f"[strata] warm start: {seed} is not there yet", flush=True)
+            except Exception as e:                      # whatever is wrong with the file, the server starts
+                print(f"[strata] warm start: {seed} is not a chat request this server can read ({e}); ignored",
+                      flush=True)
+        ids = self.warm_ids
+        if ids is None or len(ids) >= self.engine.max_context:
+            return
         stop = self.warm_stop = threading.Event()
 
         def warm():
             t0, read = time.perf_counter(), 0
             try:
                 with self.fifo:
-                    if not stop.is_set():               # read to the end: the one token comes after the prompt
+                    if self.pin_start():                # no read: also after a request that came first
+                        return
+                    if not stop.is_set():
+                        print(f"[strata] warm start: reading the {len(ids)}-token prompt start kept last time",
+                              flush=True)
+                        # read to the end: the one token comes after the prompt
                         read = sum(t is not None for t in self.engine.generate(ids, 1, {}, stop))
+                    took = time.perf_counter() - t0
+                    print(f"[strata] warm start: read {len(ids)} tokens in {took:.1f} s" if read else
+                          f"[strata] warm start: stopped for a request after {took:.1f} s", flush=True)
+                    if read:
+                        self.pin_start(make=True)
             except Exception as e:                      # the next request starts a dead engine again (run())
                 print(f"[strata] warm start failed: {e}", flush=True)
-                return
-            took = time.perf_counter() - t0
-            print(f"[strata] warm start: read {len(ids)} tokens in {took:.1f} s" if read else
-                  f"[strata] warm start: stopped for a request after {took:.1f} s", flush=True)
 
-        print(f"[strata] warm start: reading the {len(ids)}-token prompt start kept last time", flush=True)
         threading.Thread(target=warm, name="warm-start", daemon=True).start()
 
     def models(self) -> list[dict]:
@@ -5603,7 +5675,7 @@ class Service:
             for e in self.models():
                 if e["current"] or e["status"] == "unavailable":
                     continue
-                other = {"id": e["id"], "object": "model",
+                other = {"id": e["id"], "object": "model", "source": "preset",   # llama-server's router: loads on use
                          "status": {"value": "loading" if e["status"] == "loading" else "unloaded"},
                          **({"meta": {"n_ctx": e["context"]}} if e["context"] else {}),
                          "architecture": {"input_modalities": ["text", "image"] if e["multimodal"] else ["text"],
@@ -5656,7 +5728,9 @@ class Service:
                 # under the FIFO: a model switch replaces the engine there (issue 114: strata-poly got the command and
                 # its reply made the server end it)
                 if not getattr(self.engine, "disk_sessions", True):
-                    return error(501, "slot save/restore is not available with strata-poly, this model's engine")
+                    return error(501, "slot save/restore is not available with this model's engine "
+                                      f"({Path(str(self.engine.spawn[0])).stem}); strata-poly has it after "
+                                      "0.1.45-poly.9")
                 with self.status_lock:
                     self.status.update(busy=True, phase="saving the session" if action == "save"
                                        else "restoring a session", started=time.time(), first_token=None,
@@ -5999,6 +6073,8 @@ class Service:
                 raise EngineDied(f"the engine could not be started: {e}") from e
             raise
         print("[strata] the engine is running again", flush=True)
+        if self.warm_start:                              # the kept prompt start, when its session file is there
+            self.pin_start()
         if self.restore_after_load:                      # an image job unloaded it: its conversation comes back
             images_api.restore_session(self)
         if self.vram_reserve is not None and hasattr(self.engine, "vram"):   # #533: the reserve asked for last
@@ -10289,6 +10365,9 @@ def model_settings(cfg: dict, overrides: dict | None = None) -> dict:
     mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
     if mode not in ("model", "on_request"):
         raise ValueError(f"anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
+    warm = cfg.get("warm_start", False)                # true, or the chat request whose first turn is the start
+    if not isinstance(warm, (bool, str)) or warm == "":
+        raise ValueError(f"\"warm_start\" must be true, false or the path of a chat request (a JSON file), not {warm!r}")
     rs = cfg.get("repeat_stop_tokens", REPEAT_STOP_TOKENS)   # #606: opt-out with 0
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise ValueError(f"\"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
@@ -10323,7 +10402,7 @@ def model_settings(cfg: dict, overrides: dict | None = None) -> dict:
         "anthropic_think_unasked": mode == "model",
         "tool_call_recovery": recovery,                                      # on by default since 0.2.8
         "undeclared_tool_calls": undeclared,                                 # #4622
-        "warm_start": flag("warm_start"),                                    # opt-in: see Service.start_warm
+        "warm_start": warm,                                    # opt-in: see Service.start_warm
         "repeat_stop_tokens": rs,
         "reasoning_budget_tokens": budget if budget is not None else 0,
         "reasoning_budget_configured": budget is not None,

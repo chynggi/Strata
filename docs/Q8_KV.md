@@ -8,6 +8,10 @@ Flint and LFM2.5 they move at about 2-3% of the steps (below).
 In this version it is offered for `qwen35moe` (Tiel, Ornith, Occamy), `kolibri1`, `flint` and `lfm2moe`
 (LFM2.5-24B-A2B) files; another architecture is rejected at load.
 
+Setup takes it too: `setup --family flint --kv q8_0` (`setup.sh` / `setup.bat`) writes `--kv q8_0` into the model's
+run config, and setup run again for that model keeps it; `--kv fp16` takes it out. For a model whose architecture
+has no such format setup says so and goes on with fp16. On a Mac the option is `--poly-kv` ([MAC.md](MAC.md)).
+
 Gemma 4 has its own two, in the same Q8_0 rule but its own layout: `--kv int8` and `--kv int8k`
 ([the int8 pair, below](#the-int8-pair-for-gemma-4-strata-poly---kv-int8-and---kv-int8k)).
 

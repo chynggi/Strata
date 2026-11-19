@@ -26,9 +26,10 @@ constexpr int kMaxRows = 4;     // tokens a launch: 8 x 4 = 32 queries
 inline int mode(const char* v) { return v == nullptr ? 0 : std::atoi(v); }
 inline bool requested(const char* v) { return mode(v) != 0; }
 
-// CUDA's signed __dp4a.  RDNA1 (wave32, no dot instructions) selects and sign-extends the bytes with SDWA; elsewhere the shared one.
+// CUDA's signed __dp4a.  Navi 10 (gfx1010: wave32, no dot instructions) selects and sign-extends the bytes with SDWA; elsewhere the
+// shared one, which on gfx1012 is the native v_dot4_i32_i8 (or the same SDWA under -DSTRATA_GFX1012_SDWA_DOT).
 __device__ __forceinline__ int dp4a_i8(int a, int b, int c) {
-#if defined(__gfx1010__) || defined(__gfx1012__)
+#if defined(__gfx1010__)
     int lo, hi;
     asm("v_mul_i32_i24 %1, sext(%3), sext(%4) dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_0 src1_sel:BYTE_0\n"
         "v_mul_i32_i24 %2, sext(%3), sext(%4) dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_1 src1_sel:BYTE_1\n"

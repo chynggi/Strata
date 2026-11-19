@@ -118,7 +118,7 @@ HF_REVISIONS = {
     "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP": "bbe9e566f39e4fc9652ac66b71968289a03c520a",        # 2026-09-10
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
     "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": "1ada08422e404aca51ab9df665f089f34c419c6b",           # 2026-10-13
-    "unsloth/LFM2.5-24B-A2B-GGUF": "faa77113e93335b63423e9e8d33395f86eaf8946",                        # 2026-10-15
+    "unsloth/LFM2.5-24B-A2B-GGUF": "aacc77834f6aa568c93b4dbd6d295059736be98c",                        # 2026-10-20
     "LiquidAI/LFM2.5-24B-A2B-GGUF": "0912d33141f77e10705345a6732bfd83f0252fdc",                       # 2026-10-15
     "unsloth/flint-GGUF": "20468edfc38ab43d6914cc88b08cbecb05d0fc62",                                 # 2026-10-21
     "openbmb/MiniCPM-V-4.7-35B-A3B-gguf": "77f6d8cb08b2b115ce27d2e2ac1359e126921689",                   # 2026-10-12
@@ -7937,6 +7937,18 @@ def carry_user_args(old: dict, cfg: dict, explicit: list[str] | None = None) -> 
     return ["args " + f for f in dict.fromkeys(g[0] for g in user_args.groups(mine) if g[0].startswith("--"))]
 
 
+def warm_start_into(cfg: dict, a) -> None:
+    """--warm-start [FILE]: the run config's "warm_start" (serve/server.py's Service.start_warm).  Written only when
+    given: an earlier config's is carried over (write_setup_config)."""
+    w = getattr(a, "warm_start", None)
+    if w is None:
+        return
+    cfg["warm_start"] = w if w is True else str(Path(w).expanduser().resolve())
+    ok("warm start: the server keeps an agent's system prompt with its tools and has it ready when it starts"
+       + ("" if w is True else f" (the one in {cfg['warm_start']}"
+          + ("" if Path(cfg["warm_start"]).is_file() else ", once the agent has written it") + ")"))
+
+
 def flag_value(args: list, flag: str):
     """The value after `flag` in an argument list, or None."""
     for i, a in enumerate(args[:-1]):
@@ -9305,6 +9317,26 @@ def poly_verdict(d, ram, vram_gb, hip, windows=False) -> str:
         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
 
 
+# --kv for a model of strata-poly (docs/Q8_KV.md): the formats its architecture's attention caches have beside
+# fp16, the default.  The other engine's own are STRATA_KV.
+POLY_KV = {"q8_0": ("qwen36poly", "ornith", "ornith122", "tiel", "minicpmv", "kolibri", "flint", "lfm25"),
+           "int8": ("gemma4",), "int8k": ("gemma4",)}
+STRATA_KV = ("int8", "q4_0", "k8v4", "fp16")
+
+
+def poly_saved_kv(paths) -> str | None:
+    """--kv of an earlier run config of this model (the first of `paths` there is), or None."""
+    for p in paths:
+        if p is None or not p.is_file():
+            continue
+        try:
+            args = json.loads(p.read_text(encoding="utf-8-sig")).get("args")
+        except (OSError, ValueError, AttributeError):
+            continue
+        return flag_value(args, "--kv") if isinstance(args, list) else None
+    return None
+
+
 def poly_saved_conv(paths) -> int | str | None:
     """--conversation-cache-mib of an earlier run config of this model (the first of `paths` there is): MiB, or "auto";
     0 when that config has none; None without an earlier config: setup then asks."""
@@ -9699,7 +9731,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     unused = [flag for flag, given in (
         ("--vision", not sees and a.vision not in (None, "no", "none")),
         ("--vision-tokens", not sees and a.vision_tokens is not None),
-        ("--kv", a.kv), ("--kv-streaming", a.kv_streaming != "auto"), ("--rope-scaling", a.rope_scaling),
+        ("--kv", a.kv and a.kv != "fp16" and family not in POLY_KV.get(a.kv, ())),
+        ("--kv-streaming", a.kv_streaming != "auto"), ("--rope-scaling", a.rope_scaling),
         ("--rope-scale", a.rope_scale is not None), ("--low-ram", a.low_ram != "auto"),
         ("--resident-budget-gib", a.resident_budget_gib is not None),
         ("--draft-vocab", a.draft_vocab), ("--layer-split", a.layer_split and not multi), ("--calibrate", a.calibrate),
@@ -9801,6 +9834,11 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
 
     # the conversation cache: asked once, then kept as the model's run config has it
     cfg_path = home() / f"strata-{CFG_PREFIX}{tag.lower()}.json"   # dual boot: this OS's (strata_mcp.py configs())
+    # the attention caches' format (issue 183): --kv when this model has that one, else what its run config had;
+    # --kv fp16 goes back to the default
+    kv = a.kv or poly_saved_kv([cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None])
+    if family not in POLY_KV.get(kv, ()):
+        kv = None
     conv = poly_saved_conv([cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None])
     if conv is None:
         say()
@@ -9972,6 +10010,9 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
            "that much less)")
     if fam.get("tail_skip"):
         args += ["--tail-skip", str(fam["tail_skip"])]
+    if kv:
+        args += ["--kv", kv]
+        ok(f"attention caches stored as {kv} (--kv in the config, docs/Q8_KV.md; --kv fp16 at setup takes it out)")
     if not multi and poly_batch(fam, d, vram, ctx):
         args += ["--prompt-batch", "2048"]
         ok("prompts are read 2,048 tokens at a time (--prompt-batch in the config)")
@@ -10028,6 +10069,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     for line in poly_parallel_note(a.parallel, d, vram):
         (ok if a.parallel is not None else say)(line if a.parallel is not None else "  " + line)
     poly_kv_whole(cfg)
+    warm_start_into(cfg, a)
     write_setup_config(cfg_path, cfg, earlier)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     if script.exists():     # run-<tag>: a strata-poly config (strata-<tag>.json) names no picture choice, so no -vision
@@ -10648,6 +10690,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         else:
             cfg["parallel"] = 1
             ok("parallel requests: one at a time (--parallel 1)")
+    warm_start_into(cfg, a)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None, explicit_args(a))
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     ok(f"start script: {script.name}")
@@ -11204,9 +11247,10 @@ def main() -> int:
     ap.add_argument("--rope-scale", type=float,
                     help="the extension factor, finite and >= 1 (default: the final context over the trained "
                          "262144, at least 1 - 1.5 for 384K, 2 for 512K, 1 inside the trained range)")
-    ap.add_argument("--kv", choices=["int8", "q4_0", "k8v4", "fp16"],
+    ap.add_argument("--kv", choices=["int8", "q4_0", "k8v4", "fp16", "q8_0", "int8k"],
                     help="KV cache precision above 8K context: int8 (default), q4_0 (half the memory, a little less "
-                         "precise) k8v4 (hybrid: INT8 K + 4-bit V, 816 B/cell) or fp16 (16-bit, twice the memory of int8)")
+                         "precise) k8v4 (hybrid: INT8 K + 4-bit V, 816 B/cell) or fp16 (16-bit, twice the memory of int8). For a model of strata-poly "
+                         "(docs/Q8_KV.md): q8_0, int8 or int8k (Gemma 4), or fp16 (the default)")
     ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
                     help="let the model read images (on by default where the model can; yes = the best reader for this card: the CPU "
                          "under 24 GB of VRAM, the GPU from 24 GB, any make; gpu / cpu = that reader; no = text only)")
@@ -11337,6 +11381,12 @@ def main() -> int:
     ap.add_argument("--parallel", type=int, metavar="N",
                     help="up to N requests decode together (batch slots, opt-in; default: one at a time, the others "
                          "wait). Each slot takes VRAM from the expert cache; setup says what it recommends")
+    ap.add_argument("--warm-start", nargs="?", const=True, metavar="FILE",
+                    help="an agent's system prompt with its tools is ready when the server starts (\"warm_start\" in "
+                         "the run config, opt-in): the server keeps the one the last agent sent, and strata-poly keeps "
+                         "it in memory beside the conversations. FILE: a chat request (JSON with messages and tools, "
+                         "as /v1/chat/completions takes them) whose system prompt it is, so the first start has it too; "
+                         "it may be written later (by the agent): until then the server starts without it")
     ap.add_argument("--replicas", type=int, metavar="N",
                     help="several GPUs: run N independent engines, each on its own equal group of the chosen cards (2 "
                          "replicas on 4 cards = two 2-card engines), requests spread over them (opt-in; more total "
@@ -11815,6 +11865,8 @@ def main() -> int:
         fail(draft_model_refusal(a.draft_model, fam, {}), "leave out --draft-model")
     if fam.get("engine") == "poly":                     # another engine: its own questions and steps
         return poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted)
+    if a.kv and a.kv not in STRATA_KV:
+        fail(f"{fam['title']} has no --kv {a.kv}", "its KV cache is int8 (the default), q4_0 or k8v4")
     say()
     sizes = fam.get("sizes") or {m: d for m, d in MODELS.items() if family in d.get("families", ("qwen", "swift"))}
     names = list(sizes)
@@ -12316,6 +12368,7 @@ def main() -> int:
     _built = setup_config.config_for(setup_config.SetupInputs(
         a=a, adopted=adopted, chosen=chosen, cuda_tk=cuda_tk, draft_vocab=draft_vocab, eng=eng, engine_ver=engine_ver, esp=esp, fam=fam, family=family, gpu=gpu, hip=hip, in_budget=in_budget, lib_dirs=lib_dirs, low_ram=low_ram, meta=meta, mmproj=mmproj, model=model, model_args=model_args, models_dir=models_dir, multi=multi, pack=pack, ple=ple, port=port, q4_split=q4_split, ram=ram, reader=reader, ready=ready, rope_scale=rope_scale, rt=rt, scaling=scaling, shards=shards, tag=tag, vision=vision, ctx=ctx, kv=kv, resident=resident, budget=budget, GGUFFile=GGUFFile, sizes=sizes), sys.modules[__name__])
     cfg, cfg_path, cal, args, ctx, kv, resident = (_built.cfg, _built.cfg_path, _built.cal, _built.args, _built.ctx, _built.kv, _built.resident)
+    warm_start_into(cfg, a)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None, explicit_args(a),
                        after_carry=(lambda c: uma_cache_guard(c, model, gpu)) if gpu.get("uma") else None)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)

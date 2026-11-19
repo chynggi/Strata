@@ -839,6 +839,36 @@ size_t Engine::kv_step_bytes() const {
     return b;
 }
 
+// ROCm on Linux maps a piece through amdgpu's GEM_VA call (the handle's dmabuf, imported into the render node and
+// given its address there), which queues the page-table update and returns.  A graphics job waits for that update
+// when it is submitted; a kernel launched from a user-mode queue waits for nothing.  Where amdgpu writes a compute
+// VM's page tables with SDMA jobs and not from the CPU - a card whose BAR does not cover its VRAM, so a PC without
+// Resizable BAR (amdgpu's vm_update_mode) - the kernel that touches the piece next can run before its pages are
+// there: "Memory Fault Error ... kernel: __amd_rocclr_fillBufferAligned", and "an illegal memory access" from every
+// call after it.
+//
+// An ordinary allocation is mapped by KFD's own call, which waits for its page-table job, queued behind the VM's
+// earlier ones, and then flushes the TLB.  One made and freed here is the wait, for as long as the kernel takes.  It
+// has to reach the kernel: 4 MiB does, 64 KiB came out of a block ROCm already held and waited for nothing.  A card
+// with no VRAM left for it gets 20 ms.  STRATA_VMM_SETTLE=0 leaves the wait out, to see the fault.
+void Engine::vmm_settle() {
+#ifdef STRATA_VMM_MAP_SETTLES
+    static const bool off = [] {
+        const char* v = std::getenv("STRATA_VMM_SETTLE");
+        return v && v[0] == '0';
+    }();
+    if (off) return;
+    OnCard here(device_, split_);
+    void* p = nullptr;
+    if (cudaMalloc(&p, size_t(4) << 20) == cudaSuccess) {
+        ck(cudaFree(p), "waiting for a VRAM mapping");
+    } else {
+        (void) cudaGetLastError();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+#endif
+}
+
 // VRAM for the first `bytes` of m, in pieces of at most `piece` bytes.  Throws std::runtime_error.
 void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
     // With the pool a piece is one of its handles and comes from it, never from the card; a map it cannot serve
@@ -889,6 +919,7 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
             throw std::runtime_error("no VRAM for " + std::string(what) + " (" + std::to_string(n >> 20) +
                                      " MiB more)");
         }
+        vmm_settle();   // on Linux ROCm the piece's pages are there once this returns, not before
         // A handle the pool kept holds what its last map left in it, expert bytes or old rows, where a created one
         // comes zeroed from the system.  Rows nothing has written yet are read by the kernels' tiles (the causal mask
         // does not stop a NaN from them), so a piece is zeroed as it is mapped.  Not the staging buffer: its uploads
@@ -949,6 +980,7 @@ void Engine::vmm_unmap(Mapped& m, size_t bytes) {
         must(cuMemSetAccess(m.base + at, n, &access, 1), "mapping VRAM again");
         at += n;
     }
+    vmm_settle();   // the slots and the recorded launches point into these pieces: nothing may run before they are back
     // amdgpu counts the VRAM as free 2 to 5 ms later: a reading before that (mind_vram()'s log line, cover()) is
     // short by what was given back.  At most 100 ms, as another program may take VRAM meanwhile.
     const size_t back = (had - m.mapped) / 8 * 7, want = free_b + back;
@@ -1432,6 +1464,10 @@ float* Engine::fbuf(size_t n) {
     float* p = scratch_ ? scratch_ + scratch_at_ : nullptr;
     scratch_at_ += (n + 63) & ~size_t(63);
     return p;
+}
+
+std::vector<std::pair<const uint8_t*, size_t>> Engine::model_views() const {
+    return gg_ ? gg_->views() : std::vector<std::pair<const uint8_t*, size_t>>{};
 }
 
 int64_t Engine::meta_u(const char* key, int64_t fallback) const {
@@ -2701,9 +2737,9 @@ void Engine::load(const Options& o) {
         vmm_ = cuMemGetAllocationGranularity(&grain_, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM) == CUDA_SUCCESS &&
                grain_ > 0;
     }
-    pool_on_ = opt_.vram_pool && vmm_ && opt_.kv_grow && !split_;
+    pool_on_ = opt_.vram_pool && vmm_ && opt_.kv_grow;
     if (opt_.vram_pool && !pool_on_)
-        std::fprintf(stderr, "strata-poly: --vram-pool needs VMM, growing attention caches and one card: off\n");
+        std::fprintf(stderr, "strata-poly: --vram-pool needs VMM and growing attention caches: off\n");
     if (pool_on_) pg_ = up_to(size_t(2) << 20, grain_);
 
     // the token table stays in the file, a row a token, and embed() reads a row in whatever type it has

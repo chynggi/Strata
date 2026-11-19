@@ -796,6 +796,8 @@ if(STRATA_BUILD_TESTS)
   add_test(NAME poly_hip_value_split_policy_test COMMAND poly_hip_value_split_policy_test)
   add_executable(poly_gdn_mma_control_test src/poly/gdn_mma_control_test.cpp)
   add_test(NAME poly_gdn_mma_control_test COMMAND poly_gdn_mma_control_test)
+  add_executable(poly_q35_scratch_arena_test src/poly/q35_scratch_arena_test.cpp)
+  add_test(NAME poly_q35_scratch_arena_test COMMAND poly_q35_scratch_arena_test)
   add_executable(poly_stream_stage_test src/poly/stage_copy_test.cpp)
   add_test(NAME poly_stream_stage_test COMMAND poly_stream_stage_test)
 endif()
@@ -913,7 +915,7 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
                             src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/flint.cpp
                             src/poly/kolibri1.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu
-                            src/poly/spill.cpp src/core/conversation_memory.cpp)
+                            src/poly/spill.cpp src/core/conversation_memory.cpp src/core/conversation_file.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
   # the driver's virtual memory calls: the attention caches grow with the conversation; on HIP they are HIP's
   # memory management calls, which the HIP runtime itself provides (hip_compat/cuda.h)

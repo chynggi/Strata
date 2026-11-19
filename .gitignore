@@ -38,6 +38,7 @@ td.log
 /strata-*.json.bak
 /strata-*.log
 /strata-*.warm-start
+/strata-*.warm-start-*.bin
 /build-strata.bat
 /build-strata-cuda12.bat
 /build-cuda12/

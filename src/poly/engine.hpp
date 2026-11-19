@@ -237,6 +237,11 @@ public:
     double numa_share() const { return node_share_; }
     int64_t pos() const { return pos_; }
     int64_t meta_u(const char* key, int64_t fallback) const;
+    /// The mapped bytes of each of the model's files, the one with the metadata first; {nullptr, 0} for a file
+    /// without tensors.
+    std::vector<std::pair<const uint8_t*, size_t>> model_views() const;
+    /// --kv as load() settled it, as a number: a session file is bound to it.
+    int kv_format() const { return (int) opt_.kv_format; }
     /// What --kv asked for, in the two short forms an architecture's code reads: the int8 codes/delta cache
     /// (both sides, or the keys' side alone under int8k).
     bool int8() const { return opt_.kv_format == KvFmt::kInt8 || opt_.kv_format == KvFmt::kInt8K; }
@@ -617,6 +622,7 @@ protected:
     void vmm_reserve(Mapped& m, size_t bytes);
     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
     void vmm_unmap(Mapped& m, size_t bytes);
+    void vmm_settle();
     void vmm_free(Mapped& m);
     /// The pool (Options::vram_pool): handles of pg_ bytes, claimed once, that the maps take from and the unmaps give to.
     void vpool_claim(size_t bytes);
