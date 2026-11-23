@@ -3396,7 +3396,9 @@ class Hy4OutputParser(OutputParser):
     OutputParser's.  A call is in the declared-tool form once translated, so the recovery that reads a drifted opener is on, as for the JSON form."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, declared_only: bool = False, deferred: bool = False):
+                 recover: bool = False, declared_only: bool = False, deferred: bool = False,
+                 call_format: str = "function", opened: bool = False):
+        # The dialect supplies the base parser's markup and reasoning boundaries.
         super().__init__(thinking=thinking, tools=tools, stream_tools=stream_tools, recover=recover,
                          declared_only=declared_only, deferred=deferred)
         from serve import hy4_dialect
@@ -3418,7 +3420,9 @@ class InklingOutputParser(JsonOutputParser):
     so `reasoning_effort=none`, interleaved thinking, and direct tool calls all parse cleanly."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, declared_only: bool = False, deferred: bool = False):
+                 recover: bool = False, declared_only: bool = False, deferred: bool = False,
+                 call_format: str = "function", opened: bool = False):
+        # Inkling's channel markers determine which parts are reasoning.
         super().__init__(thinking=False, tools=tools, stream_tools=stream_tools, recover=True,
                          declared_only=declared_only, deferred=deferred)
         from serve import inkling_dialect

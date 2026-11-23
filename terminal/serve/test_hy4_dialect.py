@@ -38,7 +38,7 @@ def stream(text: str, n: int) -> str:
 
 
 def events(text: str, n: int = 7, thinking: bool = False, tools=TOOLS):
-    p = Hy4OutputParser(thinking=thinking, tools=tools, recover=True)
+    p = Hy4OutputParser(thinking=thinking, tools=tools, recover=True, call_format="function", opened=True)
     out = []
     for piece in pieces(text, n):
         out += p.feed(piece)

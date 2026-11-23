@@ -39,7 +39,8 @@ class TestInklingDialect(unittest.TestCase):
             "<|content_model_end_sampling|>"
         )
         # Feed raw Inkling-2-Mini tokens in awkward 3-char chunks directly into InklingOutputParser
-        p = frontend.InklingOutputParser(tools=[{"name": "write_file", "parameters": {"type": "object"}}])
+        p = frontend.InklingOutputParser(tools=[{"name": "write_file", "parameters": {"type": "object"}}],
+                                         call_format="function", opened=True)
         reasoning_parts, content_parts, tool_calls = [], [], []
         for i in range(0, len(raw), 3):
             for ev in p.feed(raw[i:i + 3]):

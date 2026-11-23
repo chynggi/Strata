@@ -137,6 +137,19 @@ Source setup does not make an unsupported model or backend compatible. Strata's 
 - Keep the docs' style: plain words, short sentences, written for non-technical users first. Give measured numbers
   with what they were measured on. Make no claim without a measurement.
 
+### Serving regressions after merging upstream
+
+- In 0.2.20, upstream's `InklingOutputParser` arrived with a constructor that omitted `call_format` and `opened`.
+  The fork's `Service._run()` passed both as part of its shared parser interface, so the first chat request raised
+  `TypeError` before generation. HY-4 had the same constructor mismatch. When adding or merging a parser returned
+  by `parser_for_template()`, check its signature against the server's initial and retry call sites. Accept the
+  shared keywords and preserve the model's own reasoning and tool-call boundaries. Exercise the selected parser
+  with the server's keyword arguments in the dialect tests.
+- For a change to a model's serving path, run `strata launch` with that model and send a short request to
+  `/v1/chat/completions`. Check HTTP 200 and a nonempty assistant response. For `probe_http_400`, read the server
+  traceback for the same attempt first. The launcher appends an engine log tail, which can end with ordinary model
+  load or KV offload messages. Treat errors in earlier attempts as separate until reproduced on the same build.
+
 ## Contributing a change or report
 
 The rules are in **[CONTRIBUTING.md](.github/CONTRIBUTING.md)**. Read it before you open an issue or a pull request, and
