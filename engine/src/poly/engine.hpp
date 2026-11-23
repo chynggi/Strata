@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -40,6 +41,12 @@ namespace strata::poly {
 
 class Shards;
 struct Likeliest;
+
+/// The attention caches could not grow to the rows asked for (balanced Metal: not memory enough beside the experts).
+/// The rows they hold are as they were, so a caller can end the answers that needed more and go on.
+struct KvFull : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 /// The attention caches' storing format, opt-in via --kv.  q8_0 is ggml's blocks (one fp16 scale a 32-value
 /// block of int8 codes) and reads them back element by element; int8 is the same rule with the codes and the
@@ -232,6 +239,11 @@ public:
     int n_embd() const { return n_embd_; }
     int max_context() const { return opt_.max_context; }
     int threads() const { return workers_ ? workers_->threads() : 0; }
+    /// fn(0..n-1) on the CPU threads, returning when all are done (Workers::run()); fn must not throw.
+    void on_threads(int n, const std::function<void(int)>& fn) {
+        if (workers_) workers_->run(n, fn);
+        else for (int i = 0; i < n; ++i) fn(i);
+    }
     /// The NUMA node the CPU threads were kept on, and the share of the experts' pages it holds; -1: no node chosen.
     int numa_node() const { return node_; }
     double numa_share() const { return node_share_; }
@@ -555,6 +567,8 @@ protected:
     const Image* image_at(int64_t row) const;
     bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
+    /// lin(w1 -> y1) and lin(w2 -> y2) of one input, in one launch where the two are Q8_0 of one shape.
+    void lin_pair(const Dev& w1, const Dev& w2, const float* x, float* y1, float* y2, int n, const void* xq);
     void lin_raw(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x);
     /// The layer's ExpertScales for rows of the experts ids[r] (on the card), or none.
     ExpertScales expert_scales(const Layer& L, const int32_t* ids = nullptr) const;

@@ -408,8 +408,7 @@ void Qwen35::load_card_rows(const uint8_t* src, int64_t from, int64_t count, int
 void Qwen35::gdn(Block& B, int n) {
     lin(B.wqkv, xn_, proj_, n, xq_);
     lin(B.wz, xn_, z_, n, xq_);
-    lin(B.alpha, xn_, alpha_, n, xq_);
-    lin(B.beta, xn_, beta_, n, xq_);
+    lin_pair(B.alpha, B.beta, xn_, alpha_, beta_, n, xq_);
     if (rows_of_) {   // step(): each sequence's rows with its own convolution and state
         for (int i = 0, m; i < n; i += m) {
             // a token and its guess (step() with guesses) go in one call, a window of two, leaving the state after
@@ -592,8 +591,7 @@ void Qwen35::attn_block_pass(Block& B, int64_t pos, int n) {
 void Qwen35::attn_rows(Block& B, int n) {
     const long long* at = at_;
     lin(B.wq, xn_, qg_, n, xq_);
-    lin(B.wk, xn_, kraw_, n, xq_);
-    lin(B.wv, xn_, v_, n, xq_);
+    lin_pair(B.wk, B.wv, xn_, kraw_, v_, n, xq_);
     const float scale = 1.f / std::sqrt((float) head_dim_);
     const bool q8 = opt_.kv_format == KvFmt::kQ8_0;
     const size_t kv = (size_t) n_kv_ * head_dim_, hq = (size_t) n_head_ * head_dim_;
@@ -731,8 +729,7 @@ bool Qwen35::route_card(int, int n, int32_t* ids, float* w) {
 
 // The shared expert, times the sigmoid of its own gate.  It runs on the GPU while the host routes.
 void Qwen35::moe_shared(const Layer& L, int il, int n) {
-    lin(L.sh_gate, xn_, g_, n, xq_);
-    lin(L.sh_up, xn_, u_, n, xq_);
+    lin_pair(L.sh_gate, L.sh_up, xn_, g_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_shexp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
     lin(blocks_[(size_t) il].sh_gate_inp, xn_, sg_, n);

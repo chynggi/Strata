@@ -452,8 +452,7 @@ bool DeepSeek4::route_card(int il, int n, int32_t* ids, float* w) {
 
 // The shared expert.  It runs on the GPU while the host routes.
 void DeepSeek4::moe_shared(const Layer& L, int il, int n) {
-    lin(L.sh_gate, xn_, g_, n, xq_);
-    lin(L.sh_up, xn_, u_, n, xq_);
+    lin_pair(L.sh_gate, L.sh_up, xn_, g_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_shexp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
 }

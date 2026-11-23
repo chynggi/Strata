@@ -368,10 +368,9 @@ void Flint::attn(Block& B, int64_t pos, int n) {
     lin(B.wq, xn_, qraw_, n, xq_);
     head_norm_rope(qraw_, head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot, theta_scale_, pos, n, rms_eps_, st_,
                    nullptr, nullptr, 1, at ? at + 1 : nullptr);
-    lin(B.wk, xn_, kraw_, n, xq_);
+    lin_pair(B.wk, B.wv, xn_, kraw_, v_, n, xq_);
     head_norm_rope(kraw_, head_dim_, fp(B.k_norm), k_, head_dim_, n_kv_, n_rot, theta_scale_, pos, n, rms_eps_, st_,
                    nullptr, nullptr, 1, at ? at + 1 : nullptr);
-    lin(B.wv, xn_, v_, n, xq_);
     store(k_, B, pos, n, false);
     store(v_, B, pos, n, true);
     const float scale = 1.f / std::sqrt((float) head_dim_);
@@ -399,8 +398,7 @@ void Flint::attn(Block& B, int64_t pos, int n) {
 void Flint::attn_rows(Block& B, int n) {
     const int n_rot = B.rope ? head_dim_ : 0;
     lin(B.wq, xn_, qraw_, n, xq_);
-    lin(B.wk, xn_, kraw_, n, xq_);
-    lin(B.wv, xn_, v_, n, xq_);
+    lin_pair(B.wk, B.wv, xn_, kraw_, v_, n, xq_);
     const float scale = 1.f / std::sqrt((float) head_dim_);
     const size_t kv = (size_t) n_kv_ * head_dim_, hq = (size_t) n_head_ * head_dim_;
     const int window = B.swa ? window_ : 0, ring = B.swa ? ring_ : 0;
@@ -436,8 +434,7 @@ void Flint::attn_rows(Block& B, int n) {
 }
 
 void Flint::dense_ffn(Block& B, int il, int n) {
-    lin(B.ffn_gate, xn_, g_, n, xq_);
-    lin(B.ffn_up, xn_, u_, n, xq_);
+    lin_pair(B.ffn_gate, B.ffn_up, xn_, g_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_, clamp_shexp_[(size_t) il], st_);
     lin(B.ffn_down, h_, fo_, n);
 }
@@ -503,8 +500,7 @@ bool Flint::route_card(int il, int n, int32_t* ids, float* w) {
 
 // The shared expert, ungated: the routed experts' sum starts from its output.
 void Flint::moe_shared(const Layer& L, int il, int n) {
-    lin(L.sh_gate, xn_, g_, n, xq_);
-    lin(L.sh_up, xn_, u_, n, xq_);
+    lin_pair(L.sh_gate, L.sh_up, xn_, g_, u_, n, xq_);
     swiglu_clamp(g_, u_, h_, n * n_ff_shexp_, clamp_shexp_[(size_t) il], st_);
     lin(L.sh_down, h_, fo_, n);
 }

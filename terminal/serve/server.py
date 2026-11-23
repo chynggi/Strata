@@ -734,7 +734,7 @@ class ConvCacheLog:
 TURN_OPENERS = {"function": ("<|im_start|>",), "gemma": ("<|turn>",),
                 "glm": ("<|system|>", "<|developer|>", "<|user|>", "<|assistant|>", "<|observation|>"),
                 "dsml": ("<｜User｜>", "<｜Assistant｜>"), "lfm2": ("<|im_start|>",)}
-POLY_PRE_TOKENIZERS = ("glm4", "glm5", "flint", "gemma4", "lfm2", "kolibri1")
+POLY_PRE_TOKENIZERS = ("glm4", "glm5", "flint", "gemma4", "lfm2", "kolibri1", "laguna")
 WARM_MIN_TOKENS = 2048           # a shorter prompt start is quick to read again: not kept
 BEFORE_LOAD_TIMEOUT_S = 120.0  # #1997: how long the before_load command may run (the config's before_load_timeout_s)
 
@@ -4375,10 +4375,12 @@ class Service:
             ("bos_token", "tokenizer.ggml.bos_token_id"), ("eos_token", "tokenizer.ggml.eos_token_id"))
             if key in special}
         # how the model writes a tool call (serve/frontend.py's OutputParser)
-        self.call_format = "glm" if pre in ("glm4", "glm5", "flint") else "gemma" if pre == "gemma4" else \
+        self.call_format = "glm" if pre in ("glm4", "glm5", "flint", "laguna") else "gemma" if pre == "gemma4" else \
             "lfm2" if pre == "lfm2" else "function"
+        openers = ("<assistant>",) if pre == "laguna" else TURN_OPENERS[self.call_format]
+        self.openai_tools = self.call_format in ("gemma", "dsml") or pre == "laguna"
         self.turn_ids = frozenset(t[0] for t in (tokenizer.encode(s, parse_special=True)
-                                                 for s in TURN_OPENERS[self.call_format]) if len(t) == 1)
+                                                 for s in openers) if len(t) == 1)
         self.engine.turn_ids = self.turn_ids            # the GEN line's turn_at (StrataEngine.turn_key)
         self.think_open_ids = []
         if self.call_format == "gemma":
@@ -5813,7 +5815,7 @@ class Service:
         # preserve_thinking is the default; a request's chat_template_kwargs can still turn it off.
         kwargs = {**self.template_tokens, **({"preserve_thinking": True} if self.preserve_thinking else {}), **kwargs,
                   "enable_thinking": not off}
-        if self.call_format in ("gemma", "dsml") and tools:   # their templates read a tool as OpenAI sends it
+        if self.openai_tools and tools:   # these templates read a tool as OpenAI sends it
             tools = [{"type": "function", "function": t} for t in tools]
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             prompt = self.template.render(messages, tools=tools, **kwargs)

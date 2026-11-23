@@ -9,6 +9,9 @@
 #include "kolibri1.hpp"
 #include "lfm2moe.hpp"
 #include "flint.hpp"
+#if !defined(STRATA_GPU_METAL)
+#include "laguna.hpp"   // CUDA and HIP: its YaRN turn and softplus gate have no Metal kernels yet
+#endif
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
@@ -1130,14 +1133,14 @@ void Engine::metal_cover(int64_t end) {
     bool reduced = false;
     if (room < peak && exp_) {
         if (freeze_experts_)
-            throw std::runtime_error("balanced Metal KV growth needs memory held by frozen experts; reduce context or unfreeze the cache");
+            throw KvFull("balanced Metal KV growth needs memory held by frozen experts; reduce context or unfreeze the cache");
         const size_t cut = peak - room;
         metal_resize_cache(metal_cache_bytes_ > cut ? metal_cache_bytes_ - cut : 0);
         reduced = true;
         room = headroom();
     }
     if (room < peak)
-        throw std::runtime_error("not enough unified memory to grow the Metal attention cache; existing rows are preserved");
+        throw KvFull("not enough unified memory to grow the Metal attention cache; existing rows are preserved");
     const auto release = [&](void* p) {
         if (!p) return;
         const auto it = std::find(dev_allocs_.begin(), dev_allocs_.end(), p);
@@ -1649,9 +1652,10 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const std::string name = arch ? arch->s : std::string();
     // Clover is a qwen35moe model trained to also guess a block of tokens at once (Qwen35)
     const bool qwen35 = name == "qwen35moe" || name == "clover_moe";
-    if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe")
-        throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint and lfm2moe models in v1; "
-                                 "this is a '" + name + "' model");
+    if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
+        name != "laguna")
+        throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and laguna models in "
+                                 "v1; this is a '" + name + "' model");
     // int8 and int8k are Gemma 4's: their readers are not the arithmetic q8_0's are, so a model takes one
     // family or the other rather than a choice between them.
     if (name != "gemma4" && (o.kv_format == KvFmt::kInt8 || o.kv_format == KvFmt::kInt8K))
@@ -1668,6 +1672,9 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         if (name == "lfm2moe") return std::make_unique<Lfm2Moe>();
         if (name == "flint") return std::make_unique<Flint>();
         if (name == "kolibri1") return std::make_unique<Kolibri1>();
+#if !defined(STRATA_GPU_METAL)
+        if (name == "laguna") return std::make_unique<Laguna>();
+#endif
         throw std::runtime_error(o.model + " is a '" + name + "' model, which this engine does not run");
     };
     int cards = 1, devices = 1;
@@ -3588,6 +3595,29 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
     if (w.scale != 1.0f) axpy(y, w.scale, y, n * w.n_out, false, st_);
 }
 
+// Two Q8_0 matrices of one shape on one input, a few tokens' worth (Unsloth's files keep attention, the recurrent
+// layers' projections and the shared expert in Q8_0): one launch, each output the bits of its own launch.  A small
+// matrix alone (a recurrent layer's alpha and beta, 32 outputs) leaves most of the card idle for its launch.
+void Engine::lin_pair(const Dev& w1, const Dev& w2, const float* x, float* y1, float* y2, int n, const void* xq) {
+#if !defined(STRATA_GPU_METAL)
+    if (w1.type == w2.type && (w1.type == kTypeF32 || w1.type == kTypeBF16) && w1.n_in == w2.n_in && n < kStageRows &&
+        w1.scale == 1.0f && w2.scale == 1.0f) {
+        gemv_pair(w1.type == kTypeBF16 ? 1 : 0, w1.p, w2.p, x, y1, y2, w1.n_in, w1.n_out, w2.n_out, n, st_);
+        return;
+    }
+    const bool pair = xq && n >= 2 && n <= 8 && w1.type == w2.type && w1.n_in == w2.n_in && w1.n_out == w2.n_out &&
+                      w1.scale == 1.0f && w2.scale == 1.0f && !(mmq_ && n >= kStageRows);
+#if defined(STRATA_USE_HIP)
+    // Eight rows can use the RDNA WMMA kernel in lin_raw; preserve that dispatch.
+    if (pair && n < 8 && kernels::native_mmvq_pair((int) w1.type, w1.p, w2.p, xq, y1, y2, w1.n_in, w1.n_out, n, st_)) return;
+#else
+    if (pair && kernels::native_mmvq_pair((int) w1.type, w1.p, w2.p, xq, y1, y2, w1.n_in, w1.n_out, n, st_)) return;
+#endif
+#endif
+    lin(w1, x, y1, n, xq);
+    lin(w2, x, y2, n, xq);
+}
+
 ExpertScales Engine::expert_scales(const Layer& L, const int32_t* ids) const {
     ExpertScales s;
     if (L.h_s_gate.empty() && L.h_s_up.empty()) return s;
@@ -5059,7 +5089,12 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n, const int32_t* 
         const int m = guesses && guesses[i] >= 0 ? 2 : 1;
         if (pos_ + m > opt_.max_context)
             throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
-        cover(pos_ + m);
+        try {
+            cover(pos_ + m);
+        } catch (const KvFull&) {
+            hold(home);
+            throw;
+        }
         for (int j = 0; j < m; ++j) {
             rseq.push_back(seqs[i]);
             rtok.push_back(j ? guesses[i] : tokens[i]);
@@ -5325,7 +5360,12 @@ void Engine::draft_many(const int* seqs, const int32_t* tokens, int n, int32_t* 
         guesses[i] = -1;
         hold(seqs[i]);
         if (pos_ + 2 > opt_.max_context) continue;
-        cover(pos_ + 1);
+        try {
+            cover(pos_ + 1);
+        } catch (const KvFull&) {
+            hold(home);
+            throw;
+        }
         ck(cudaMemcpyAsync(step_h_ + rows.size() * e, hn_, e * sizeof(float), cudaMemcpyDeviceToDevice, cs(st_)),
            "draft");
         rows.push_back({seqs[i], pos_});

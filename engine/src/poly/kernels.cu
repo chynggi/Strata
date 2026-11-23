@@ -96,6 +96,23 @@ __global__ void gemv_kernel(const W* __restrict__ w, const float* __restrict__ x
     if (threadIdx.x == 0) y[tok * n_out + o] = acc;
 }
 
+// Two matrices on one input in one launch: an output's block is gemv_kernel's for it, so are its bits.
+template<typename W>
+__global__ void gemv_pair_kernel(const W* __restrict__ w1, const W* __restrict__ w2, const float* __restrict__ x,
+                                 float* __restrict__ y1, float* __restrict__ y2, int n_in, int n_out1, int n_out2) {
+    __shared__ float part[32];
+    const bool second = int(blockIdx.x) >= n_out1;
+    const int o = second ? int(blockIdx.x) - n_out1 : int(blockIdx.x);
+    const int n_out = second ? n_out2 : n_out1;
+    const size_t tok = blockIdx.y;
+    const W* wr = (second ? w2 : w1) + size_t(o) * n_in;
+    const float* xr = x + tok * n_in;
+    float acc = 0.0f;
+    for (int i = threadIdx.x; i < n_in; i += blockDim.x) acc += ldw(wr, i) * xr[i];
+    acc = block_sum(acc, part);
+    if (threadIdx.x == 0) (second ? y2 : y1)[tok * n_out + o] = acc;
+}
+
 }  // namespace
 
 // The threads of a block that sums over n values.  A thread reads its values one after the other, and a kernel
@@ -1113,11 +1130,12 @@ __global__ void add_bias_kernel(const float* __restrict__ b, float* __restrict__
 // One block per head and token.  The pairs of the rotation are i and i + n_rot / 2 for i below n_rot / 2.  With
 // axes, a token has a position on each of three axes, and pair j turns by the one on axis (j % sections) % 3.
 // With `at`, the first token's position is what the card holds there when the launch runs.
+template <bool Yarn>
 __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride, const float* __restrict__ w,
                                       float* __restrict__ y, int dim, int heads, int n_rot, float theta_scale,
                                       const float* __restrict__ freq, long long pos, float eps,
                                       const int* __restrict__ axes, int sections,
-                                      const long long* __restrict__ at) {
+                                      const long long* __restrict__ at, RopeYarn yarn) {
     __shared__ float part[8];
     const float* xr = x + size_t(blockIdx.x) * x_stride;
     float* yr = y + size_t(blockIdx.x) * dim;
@@ -1139,7 +1157,22 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
         const float theta = freq ? turn / freq[j] : turn;
         const float x0 = w ? xr[j] * scale * w[j] : xr[j] * scale;
         const float x1 = w ? xr[j + half] * scale * w[j + half] : xr[j + half] * scale;
-        yr[i] = i < half ? x0 * cosf(theta) - x1 * sinf(theta) : x0 * sinf(theta) + x1 * cosf(theta);
+        if constexpr (Yarn) {
+            // ggml's rope_yarn: the interpolated angle, mixed with the extrapolated one by the ramp over the pairs
+            // (rope_yarn_ramp: pair j's place between corr_low and corr_high), and the magnitude on cos and sin
+            const float interp = yarn.freq_scale * theta;
+            float angle = interp;
+            if (yarn.ext_factor != 0.0f) {
+                const float ramp_y = (float(j) - yarn.corr_low) / fmaxf(0.001f, yarn.corr_high - yarn.corr_low);
+                const float ramp = (1.0f - fminf(1.0f, fmaxf(0.0f, ramp_y))) * yarn.ext_factor;
+                angle = interp * (1.0f - ramp) + theta * ramp;
+            }
+            const float c = cosf(angle) * yarn.mscale, s = sinf(angle) * yarn.mscale;
+            yr[i] = i < half ? x0 * c - x1 * s : x0 * s + x1 * c;
+        } else {
+            (void) yarn;
+            yr[i] = i < half ? x0 * cosf(theta) - x1 * sinf(theta) : x0 * sinf(theta) + x1 * cosf(theta);
+        }
     }
 }
 
@@ -2212,6 +2245,17 @@ __global__ void mul_sigmoid_kernel(float* __restrict__ acc, const float* __restr
     acc[size_t(blockIdx.y) * n + i] *= sigmoid(g[size_t(blockIdx.y) * g_stride + (one_gate ? 0 : i)]);
 }
 
+// ggml's softplus (op_softplus in ggml-cuda/unary.cu): x above 20 as it is, else log1p(exp(x)).
+__device__ __forceinline__ float softplus_ggml(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
+
+// mul_sigmoid_kernel with softplus: laguna's attention output gate.
+__global__ void mul_softplus_kernel(float* __restrict__ acc, const float* __restrict__ g, int n, int g_stride,
+                                    bool one_gate) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    acc[size_t(blockIdx.y) * n + i] *= softplus_ggml(g[size_t(blockIdx.y) * g_stride + (one_gate ? 0 : i)]);
+}
+
 // Where a token leaves the recurrent state as it is after it: `snaps` has a bit for each of a call's tokens that
 // does, and their states lie in the tokens' order, `stride` floats apart.  Null for a token that leaves none.
 __device__ __forceinline__ float* snap_of(float* snap, size_t stride, unsigned snaps, int row) {
@@ -2680,6 +2724,20 @@ void gemv_bf16(const uint16_t* w, const float* x, float* y, int n_in, int n_out,
     gemv(w, x, y, n_in, n_out, rows_per_x, rows, stream);
 }
 
+void gemv_pair(int type, const void* w1, const void* w2, const float* x, float* y1, float* y2, int n_in, int n_out1,
+               int n_out2, int rows, void* stream) {
+    const int threads = n_in >= 128 ? sum_threads(n_in) : 32;
+    const dim3 grid(n_out1 + n_out2, rows);
+    if (type == 1)
+        gemv_pair_kernel<uint16_t><<<grid, threads, 0, cs(stream)>>>((const uint16_t*) w1, (const uint16_t*) w2, x, y1,
+                                                                      y2, n_in, n_out1, n_out2);
+    else
+        gemv_pair_kernel<float><<<grid, threads, 0, cs(stream)>>>((const float*) w1, (const float*) w2, x, y1, y2, n_in,
+                                                                   n_out1, n_out2);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("gemv_pair: ") + cudaGetErrorString(e));
+}
+
 // A buffer of rows is its transpose to cuBLAS, so y[row] = w x[row] is Y = W^T X.  A group's rows of w, its part
 // of every token's x and of every token's y are each a matrix with a stride.
 void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, int n_out, int rows_per_x, int rows) {
@@ -3038,8 +3096,15 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream) {
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
                     float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq,
                     const int32_t* axes, int sections, const long long* at) {
-    head_norm_rope_kernel<<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
-        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps, axes, sections, at);
+    head_norm_rope_kernel<false><<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
+        x, x_stride, w, y, dim, heads, n_rot, theta_scale, freq, (long long) pos, eps, axes, sections, at, RopeYarn{});
+}
+
+void head_norm_rope_yarn(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
+                         float theta_scale, int64_t pos, int rows, float eps, void* stream, const RopeYarn& yarn,
+                         const long long* at) {
+    head_norm_rope_kernel<true><<<rows * heads, dim >= 256 ? 256 : 128, 0, cs(stream)>>>(
+        x, x_stride, w, y, dim, heads, n_rot, theta_scale, nullptr, (long long) pos, eps, nullptr, 1, at, yarn);
 }
 
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
@@ -4033,6 +4098,12 @@ void likeliest(const float* logits, int n, Likeliest* out, void* stream) {
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream) {
     for (int r = 0; r < rows; r += 65535)   // a grid has at most 65535 rows, and 4,096 tokens have 16 heads each
         mul_sigmoid_kernel<<<dim3(grid(n, 256), std::min(65535, rows - r)), 256, 0, cs(stream)>>>(
+            acc + size_t(r) * n, g + size_t(r) * g_stride, n, g_stride, one_gate);
+}
+
+void mul_softplus(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream) {
+    for (int r = 0; r < rows; r += 65535)   // a grid has at most 65535 rows: 1,024 tokens of 72 heads are 73,728
+        mul_softplus_kernel<<<dim3(grid(n, 256), std::min(65535, rows - r)), 256, 0, cs(stream)>>>(
             acc + size_t(r) * n, g + size_t(r) * g_stride, n, g_stride, one_gate);
 }
 
