@@ -933,12 +933,13 @@ struct InkCudaModel {
         }
         for (const auto& kv : mf.m.dspark_tensors) {
             TensorInfo ti;
-            ti.name = kv.second.name;
+            // GGUF provides unprefixed names, while CUDA looks up dspark.*.
+            ti.name = kv.first.rfind("dspark.", 0) == 0 ? kv.first : "dspark." + kv.first;
             ti.fmt = kv.second.fmt;
             ti.shape = kv.second.shape;
             ti.off = kv.second.off;
             ti.bytes = kv.second.bytes;
-            man.dspark[kv.first] = std::move(ti);
+            man.dspark[ti.name] = std::move(ti);
         }
 
         // 2. Read Section 1 trunk + DSpark & upload to GPU 0

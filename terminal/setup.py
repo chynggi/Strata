@@ -13601,7 +13601,7 @@ def main() -> int:
     need = min(d["ram_gb"] for d in MODELS.values() if not d.get("mem_total"))   # Gyro counts VRAM + RAM: not a RAM floor
     low_ok = low_ram_fits("IQ1_M", ram, low_ram_vram(gpu)) and a.low_ram != "off"   # the smallest model, mapped
     # a family of strata-poly has its own estimate of the RAM it wants, by size and card (poly_setup)
-    own_ram = bool(a.family) and FAMILIES[a.family].get("engine") == "poly"
+    own_ram = bool(a.family) and FAMILIES.get(a.family, {}).get("engine") == "poly"   # OWN_PATH/HY4/INKLING families are not in FAMILIES
     if ram < need - 4 and not a.check and not low_ok and not own_ram:
         # every model keeps ALL its experts in RAM (23+ GB); VRAM only holds a copy of the most-used ones, so a
         # bigger GPU does not lower this.  The owner's rule: a stop by default, a risk the user can take (--model
@@ -13684,7 +13684,8 @@ def main() -> int:
         named = gguf_dir_choices(Path(a.gguf_dir), a.family, a.model)
         if len(named) == 1:
             a.family, a.model = named[0]
-            say(f"  The files in {a.gguf_dir} are {FAMILIES[a.family]['title']} {a.model}: using them (no question to answer).")
+            _named_fam = {**FAMILIES, **OWN_PATH_FAMILIES, **HY4_FAMILIES, **INKLING_FAMILIES}.get(a.family, {})
+            say(f"  The files in {a.gguf_dir} are {_named_fam.get('title', a.family)} {a.model}: using them (no question to answer).")
     if not a.family and not a.yes and FEED_MODELS is None:
         feed_models_setup(getattr(a, "feed", None))    # the signed feed's models, listed after the built-in ones (nothing happens when it has none)
     fams = menu_families(hip)
