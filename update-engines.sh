@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# update-engines.sh - 원클릭 엔진 갱신 빌드 (Windows / Git Bash)
+# update-engines.sh - 원클릭 엔진 갱신 빌드 (Linux / CUDA)
 #
 # 순차 빌드 (병렬 아님):  1) Strata  2) Strata-Vision  3) Strata-Poly  4) Strata-Poly-Vision
-#   - MSVC(vcvars64) 환경을 자동으로 불러온다.
-#   - .venv-build (없으면 .venv)를 자동으로 활성화한다 (cmake / ninja 사용).
+#   - 시스템 gcc/g++ 와 CUDA 툴킷(/usr/local/cuda 등)을 사용한다.
+#   - .venv-build / .venv 에 cmake+ninja 가 있으면 그것을, 없으면 시스템의 cmake / ninja 를 사용한다.
 #   - 빌드 로그는 화면에 그대로 출력되고, build-logs/ 에도 저장된다.
-#   - 성공한 빌드는 --version/--help 로 확인한 뒤 terminal/engine/ , terminal/engine-poly/ 로 (strata launch 가 만드는 run config 의 경로) 복사한다
+#   - 성공한 빌드는 --version/--help 로 확인한 뒤 terminal/engine-linux/ , terminal/engine-poly-linux/ 로 (strata launch 가 만드는 run config 의 경로) 복사한다
 #     (기존 파일은 <이름>.previous 로 보관). --no-deploy 로 복사를 건너뛸 수 있다.
 #   - 배포 후 BUILD.json 도 strata launch(terminal/setup.py)와 같은 방식으로 갱신한다 (update-build-json.py).
 #
@@ -16,18 +16,17 @@
 #   ./update-engines.sh --no-deploy          # 빌드만 하고 engine/ 은 건드리지 않는다
 #
 # 환경 변수(선택):
-#   VCVARS=<vcvars64.bat 경로>   CUDA_ROOT=<CUDA 툴킷 루트>   CUDA_ARCH="120" (기본: nvidia-smi 자동 감지, 실패 시 native)
+#   CUDA_ROOT=<CUDA 툴킷 루트>   CUDA_ARCH="120" (기본: nvidia-smi 자동 감지, 실패 시 native)
 #   JOBS=<병렬 컴파일 수, 기본 nproc>   VISION_CUDA=ON (Strata-Vision / Poly-Vision 을 GPU 용으로 빌드, 기본 OFF=CPU)
 #   LLAMA_DIR=<Poly 용 llama.cpp>   VISION_LLAMA_DIR=<Poly-Vision 용 llama.cpp>
 
 set -uo pipefail
-export MSYS2_ARG_CONV_EXCL='*'      # CMake 인자의 Windows 경로가 MSYS 에 의해 변환되지 않게 한다
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 1
 LOGDIR="$ROOT/build-logs"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-JOBS="${JOBS:-$(nproc)}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 VISION_CUDA="${VISION_CUDA:-OFF}"
 LLAMA_DIR="${LLAMA_DIR:-$ROOT/third_party/llama.cpp}"
 VISION_LLAMA_DIR="${VISION_LLAMA_DIR:-$ROOT/third_party/llama.cpp-69f201a}"
@@ -63,62 +62,33 @@ summary() {
 }
 trap summary EXIT
 
-# ---- 1. MSVC 환경 활성화 -----------------------------------------------------------------------
-find_vcvars() {
-  [ -n "${VCVARS:-}" ] && { echo "$VCVARS"; return; }
-  local vsw="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" p
-  if [ -x "$vsw" ]; then
-    p="$("$vsw" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | tr -d '\r' | head -1)"
-    [ -n "$p" ] && [ -f "$(cygpath -u "$p")/VC/Auxiliary/Build/vcvars64.bat" ] && { echo "$(cygpath -u "$p")/VC/Auxiliary/Build/vcvars64.bat"; return; }
-  fi
-  ls -d "/c/Program Files (x86)/Microsoft Visual Studio/"*/*/VC/Auxiliary/Build/vcvars64.bat \
-        "/c/Program Files/Microsoft Visual Studio/"*/*/VC/Auxiliary/Build/vcvars64.bat 2>/dev/null | sort -V | tail -1
-}
-
-import_msvc() {
-  local vc; vc="$(find_vcvars)"
-  [ -n "$vc" ] && [ -f "$vc" ] || die "vcvars64.bat 를 찾지 못했습니다. VCVARS=<경로> 로 지정하세요."
-  banner "MSVC 환경 활성화: $vc"
-  local tmpbat; tmpbat="$(mktemp --suffix=.bat)"
-  printf '@echo off\r\ncall "%s" >nul 2>&1\r\nif errorlevel 1 exit /b 1\r\nset\r\n' "$(cygpath -w "$vc")" > "$tmpbat"
-  local dump; dump="$(cmd /c "$(cygpath -w "$tmpbat")" | tr -d '\r')" || { rm -f "$tmpbat"; die "vcvars64.bat 실행 실패"; }
-  rm -f "$tmpbat"
-  local line k v newpath=""
-  while IFS= read -r line; do
-    k="${line%%=*}"; v="${line#*=}"
-    case "$k" in
-      Path|PATH) newpath="$(cygpath -up "$v")" ;;
-      INCLUDE|LIB|LIBPATH|EXTERNAL_INCLUDE|VC*|VS*|VSCMD_*|WindowsS*|WindowsLibPath|UCRT*|UniversalCRT*|DevEnvDir|Framework*|NETFX*|Platform|CommandPromptType)
-        [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$k=$v" ;;
-    esac
-  done <<< "$dump"
-  [ -n "$newpath" ] && export PATH="$newpath:$PATH"      # MSVC 가 Git 의 link.exe 보다 앞에 오도록
-  command -v cl >/dev/null || die "vcvars 이후에도 cl.exe 가 PATH 에 없습니다"
-  echo "  cl: $(command -v cl)"
-}
-
-# ---- 2. venv 활성화 ----------------------------------------------------------------------------
+# ---- 1. cmake / ninja (venv 우선, 없으면 시스템) ----------------------------------------------------------------------------
 activate_venv() {
   local v
   for v in .venv-build .venv; do
-    if [ -f "$ROOT/$v/Scripts/activate" ] && [ -x "$ROOT/$v/Scripts/cmake.exe" ] && [ -x "$ROOT/$v/Scripts/ninja.exe" ]; then
+    if [ -f "$ROOT/$v/bin/activate" ] && [ -x "$ROOT/$v/bin/cmake" ] && [ -x "$ROOT/$v/bin/ninja" ]; then
       banner "venv 활성화: $v"
       # shellcheck disable=SC1091
-      source "$ROOT/$v/Scripts/activate"
-      echo "  cmake: $(command -v cmake)   ninja: $(command -v ninja)"
-      return
+      source "$ROOT/$v/bin/activate"
+      break
     fi
   done
-  die ".venv-build / .venv 에 cmake.exe + ninja.exe 가 없습니다 (pip install cmake ninja)"
+  command -v cmake >/dev/null || die "cmake 가 없습니다 (sudo apt install cmake  또는  pip install cmake)"
+  command -v ninja >/dev/null || die "ninja 가 없습니다 (sudo apt install ninja-build  또는  pip install ninja)"
+  command -v g++   >/dev/null || die "g++ 가 없습니다 (sudo apt install build-essential)"
+  command -v python3 >/dev/null || die "python3 가 없습니다"
+  echo "  cmake: $(command -v cmake)   ninja: $(command -v ninja)   g++: $(g++ -dumpversion)"
 }
 
-# ---- 3. CUDA / GPU 감지 ------------------------------------------------------------------------
+# ---- 2. CUDA / GPU 감지 ------------------------------------------------------------------------
 detect_cuda() {
   local root="${CUDA_ROOT:-${CUDA_PATH:-}}"
-  [ -z "$root" ] && root="$(ls -d "/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/"v* 2>/dev/null | sort -V | tail -1)"
-  [ -n "$root" ] && root="$(cygpath -u "$root")"
-  [ -x "$root/bin/nvcc.exe" ] || die "nvcc.exe 를 찾지 못했습니다. CUDA_ROOT=<툴킷 경로> 로 지정하세요."
-  NVCC="$(cygpath -m "$root/bin/nvcc.exe")"
+  [ -z "$root" ] && [ -x /usr/local/cuda/bin/nvcc ] && root=/usr/local/cuda
+  [ -z "$root" ] && root="$(ls -d /usr/local/cuda-* 2>/dev/null | sort -V | tail -1)"
+  [ -z "$root" ] && command -v nvcc >/dev/null && root="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
+  [ -x "$root/bin/nvcc" ] || die "nvcc 를 찾지 못했습니다. CUDA_ROOT=<툴킷 경로> 로 지정하세요."
+  NVCC="$root/bin/nvcc"
+  export PATH="$root/bin:$PATH"
   if [ -z "${CUDA_ARCH:-}" ]; then
     CUDA_ARCH="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '\r .' | sort -u | paste -sd';')"
     [ -z "$CUDA_ARCH" ] && CUDA_ARCH="native"
@@ -133,9 +103,9 @@ step_build() {
   local log="$LOGDIR/$STAMP-$name.log" exe="$ROOT/$bdir/$artifact"
   banner "[$name] 구성 (cmake configure)  →  $log"
   {
-    cmake -S "$(cygpath -m "$src")" -B "$(cygpath -m "$ROOT/$bdir")" -G Ninja -DCMAKE_BUILD_TYPE=Release "$@" \
+    cmake -S "$src" -B "$ROOT/$bdir" -G Ninja -DCMAKE_BUILD_TYPE=Release "$@" \
       && { printf '\n==== [%s] 빌드 (target %s) ====\n' "$name" "$target"; \
-           cmake --build "$(cygpath -m "$ROOT/$bdir")" --target "$target" -j "$JOBS"; }
+           cmake --build "$ROOT/$bdir" --target "$target" -j "$JOBS"; }
   } 2>&1 | tee "$log"
   if [ "${PIPESTATUS[0]}" -ne 0 ]; then RESULTS+=("✗ $name: 빌드 실패 (로그: $log)"); return 1; fi
   [ -f "$exe" ] || { RESULTS+=("✗ $name: 산출물 없음 ($exe)"); return 1; }
@@ -151,13 +121,13 @@ step_build() {
     local target_path="$ROOT/$dest"
     mkdir -p "$(dirname "$target_path")"
     [ -f "$target_path" ] && cp -f "$target_path" "$target_path.previous"
-    if ! cp -f "$exe" "$target_path"; then
+    if ! cp -f "$exe" "$target_path" && chmod +x "$target_path"; then
       RESULTS+=("✗ $name: 배포 실패 — $dest 를 사용 중인 서버/프로세스를 종료하세요 (빌드 산출물: $exe)"); return 1
     fi
     # BUILD.json: strata launch(setup.py)가 쓰는 것과 같은 스탬프 (src/vision_src 해시, version, archs ...)
     local what=engine kind=strata vis=cpu
     [[ "$name" == *Vision ]] && what=vision; [[ "$name" == *Poly* ]] && kind=poly; [ "$VISION_CUDA" = "ON" ] && vis=gpu
-    if ! python "$ROOT/update-build-json.py" "$what" --dir "$(dirname "$dest")" --kind "$kind" --arch "$CUDA_ARCH"          --nvcc "$NVCC" --vision "$vis"; then
+    if ! python3 "$ROOT/update-build-json.py" "$what" --dir "terminal/$(basename "$(dirname "$dest")")" --kind "$kind" --arch "$CUDA_ARCH" --nvcc "$NVCC" --vision "$vis"; then
       RESULTS+=("✗ $name: BUILD.json 갱신 실패 ($(dirname "$dest")/BUILD.json) — 바이너리는 배포됨"); return 1
     fi
     RESULTS+=("✓ $name: $dest 갱신 + BUILD.json (빌드: $bdir/$artifact)")
@@ -173,7 +143,6 @@ if [ "$DO_PULL" -eq 1 ]; then
 fi
 echo "소스: $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))  단계: ${SELECTED[*]}"
 
-import_msvc
 activate_venv
 banner "CUDA 감지"; detect_cuda
 
@@ -191,15 +160,15 @@ VISION_DEFS=("-DSTRATA_VISION_CUDA=$VISION_CUDA" "-DSTRATA_PORTABLE=OFF")
 
 # 한 단계가 실패하면 뒤 단계는 실행하지 않는다 (순차, 실패 시 중단)
 run_all() {
-  want strata && { step_build Strata "$ROOT/engine" terminal/build strata strata.exe terminal/engine/strata.exe version \
+  want strata && { step_build Strata "$ROOT/engine" terminal/build-linux strata strata terminal/engine-linux/strata version \
       -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF "${CUDA_DEFS[@]}" || return 1; }
-  want vision && { step_build Strata-Vision "$VISION_SRC" terminal/build-vision strata-vision bin/strata-vision.exe terminal/engine/strata-vision.exe version \
+  want vision && { step_build Strata-Vision "$VISION_SRC" terminal/build-vision-linux strata-vision bin/strata-vision terminal/engine-linux/strata-vision version \
       "${VISION_DEFS[@]}" || return 1; }
-  want poly && { step_build Strata-Poly "$ROOT/engine" terminal/build-poly strata-poly strata-poly.exe terminal/engine-poly/strata-poly.exe help \
+  want poly && { step_build Strata-Poly "$ROOT/engine" terminal/build-poly-linux strata-poly strata-poly terminal/engine-poly-linux/strata-poly help \
       -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF "${CUDA_DEFS[@]}" \
-      -DSTRATA_BUILD_POLY=ON "-DSTRATA_GGML_DIR=$(cygpath -m "$LLAMA_DIR")" || return 1; }
-  want poly-vision && { step_build Strata-Poly-Vision "$VISION_SRC" terminal/build-vision-poly strata-vision bin/strata-vision.exe terminal/engine-poly/strata-vision.exe version \
-      "${VISION_DEFS[@]}" -DSTRATA_VISION_POLY=ON "-DLLAMA_DIR=$(cygpath -m "$VISION_LLAMA_DIR")" || return 1; }
+      -DSTRATA_BUILD_POLY=ON "-DSTRATA_GGML_DIR=$LLAMA_DIR" || return 1; }
+  want poly-vision && { step_build Strata-Poly-Vision "$VISION_SRC" terminal/build-vision-poly-linux strata-vision bin/strata-vision terminal/engine-poly-linux/strata-vision version \
+      "${VISION_DEFS[@]}" -DSTRATA_VISION_POLY=ON "-DLLAMA_DIR=$VISION_LLAMA_DIR" || return 1; }
   return 0
 }
 run_all
