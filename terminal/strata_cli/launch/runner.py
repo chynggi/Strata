@@ -1127,7 +1127,8 @@ class Runner:
             path = self.catalog.installed_config(tag, vision=self.s.vision)
             if path is not None:
                 try:
-                    if read_config(path).get("backend") not in (None, "", "cuda"):
+                    cfg = read_config(path)
+                    if isinstance(cfg, dict) and cfg.get("backend") not in (None, "", "cuda"):
                         return None
                 except (OSError, ValueError):
                     pass                                     # setup can replace an unreadable config
