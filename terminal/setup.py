@@ -11251,8 +11251,8 @@ def shape_engine_step(a, gpu, vision, *, hip: bool = False, cuda_tk=None):
     separate component next to the Strata engine (shape_engine_fetch); with `--build` outside CONTROL mode, compiles `strata-hy4` / `strata-inkling` locally (#6588)."""
     shape = SHAPE_ENGINE["shape"]
     llama = llama_cpp_if_here()
+    from strata_control import shape_engine
     if getattr(a, "build", False) and not CONTROL:
-        from strata_control import shape_engine
         if shape in (shape_engine.HY4_SHAPE, shape_engine.INKLING_SHAPE):
             eng = build_shape_engine(shape, gpu, hip, cuda_tk, getattr(a, "yes", False))
             if eng is not None:
@@ -11261,6 +11261,12 @@ def shape_engine_step(a, gpu, vision, *, hip: bool = False, cuda_tk=None):
                 meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
                 lib_dirs = cuda_lib_dirs(cuda_tk) if (not hip and not sys.platform == "darwin") else []
                 return llama, eng, meta, lib_dirs, gpu, "none"
+    local = None if hip or getattr(a, "backend", None) in ("hip", "sycl") else shape_engine.checkout_cuda_build(ROOT, shape)
+    if local is not None:
+        exe_path, meta = local
+        SHAPE_ENGINE["local_exe"] = str(exe_path)
+        ok(f"engine for {shape}: {meta['version']} in {exe_path.parent}")
+        return llama, exe_path.parent, meta, engine_lib_dirs(exe_path.parent, cuda_tk or 13), gpu, "none"
     found = shape_engine_fetch(a)
     if found is None:
         return llama, home() / "engine", {"version": "99.0.0", "source": "local", "component": "missing"}, [], gpu, "none"

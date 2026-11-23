@@ -18,6 +18,7 @@ Nothing in this module imports anything outside the standard library and ``strat
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -149,6 +150,25 @@ def root(shape: str, components: Path | None = None) -> Path:
     if not valid(shape):
         raise ValueError(f"{shape!r} is not a model shape name")
     return shapes_dir(components) / shape
+
+
+def checkout_cuda_build(src: Path, shape: str) -> tuple[Path, dict] | None:
+    """Find a local HY-4 or Inkling CUDA build beside the checkout's setup.py."""
+    if shape not in CUSTOM_SHAPES or not (src.parent / "engine" / "CMakeLists.txt").is_file():
+        return None
+    folder = src / f"engine-{shape}"
+    exe = folder / exe_name(shape)
+    if not exe.is_file():
+        return None
+    try:
+        meta = json.loads((folder / "BUILD.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (isinstance(meta, dict) and meta.get("source") == "local" and meta.get("backend") == "cuda"
+            and isinstance(meta.get("version"), str) and meta.get("shape") == shape and meta.get("entrypoint") == exe.name
+            and ec.detect_backend()[0] == "cuda"):
+        return exe, meta
+    return None
 
 
 def installed(shape: str, components: Path | None = None) -> list[ec.EngineComponent]:

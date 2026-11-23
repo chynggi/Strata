@@ -42,7 +42,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("what", choices=["engine", "vision"])
     ap.add_argument("--dir", required=True)
-    ap.add_argument("--kind", choices=["strata", "poly"], required=True)
+    ap.add_argument("--kind", choices=["strata", "poly", "hy4", "inkling2"], required=True)
     ap.add_argument("--arch", default="native")
     ap.add_argument("--nvcc", default="")
     ap.add_argument("--vision", choices=["cpu", "gpu"], default="cpu")
@@ -59,11 +59,15 @@ def main():
         dirs = []
         if a.nvcc:
             bindir = Path(a.nvcc).parent       # the toolkit's own libraries (bin, bin/x64, lib64), as setup.py
-            dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
+            dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64", *sorted(bindir.parent.glob("targets/*/lib"))) if d.is_dir()]
         if a.kind == "poly":
             dirs += [d for d in S.cuda_lib_dirs(13) if d not in dirs]      # pip's, for an encoder kept beside it
         meta.update({"source": "local", "version": S.source_version(), "archs": archs, "cuda_dirs": dirs,
                      "toolkit": 13, "src": S.source_hash(S.ENGINE_SOURCES)})
+        if a.kind in ("hy4", "inkling2"):
+            from strata_control import shape_engine
+
+            meta.update(backend="cuda", shape=a.kind, entrypoint=shape_engine.exe_name(a.kind))
         meta.setdefault("vision", "none")
         meta.setdefault("vision_src", None)
     else:

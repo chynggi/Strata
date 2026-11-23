@@ -1127,6 +1127,11 @@ class Runner:
         root = Path(self.components_dir) if self.components_dir else None
         title = self.model_title()
         name = shape_engine.shown(shape, title)
+        local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+        if local is not None:
+            exe, meta = local
+            self.emit("engine", f"Using local {name} engine {meta['version']} at {exe}.", 100)
+            return
         self.emit("engine", shape_engine.WORDS["checking"].format(model=name))
         source = update_cmd._feed_source(argparse.Namespace(feed=self.feed or os.environ.get("STRATA_UPDATE_FEED")), root or ec.components_dir())
         said: list[str] = []
@@ -2091,6 +2096,14 @@ class Runner:
     def build_config(self, base_path: Path) -> Path:
         from strata_control import tune_knobs
         base = read_config(base_path)
+        shape = self.model_shape()
+        if shape:
+            from strata_control import shape_engine
+            if base.get("exe") == shape_engine.reference(shape):
+                local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+                if local is not None:
+                    exe, meta = local
+                    base.update(exe=str(exe), lib_dirs=meta.get("cuda_dirs") or [], backend="cuda")
         try:
             previous = read_config(launch_dir() / f"{self.name}.json")
         except (OSError, ValueError):                        # no earlier launch of this name, or an unreadable file: nothing to keep from it
@@ -2835,9 +2848,13 @@ class Runner:
             shape = self.model_shape()
             if shape:
                 from strata_control import shape_engine
-                found = shape_engine.find(shape, Path(self.components_dir) if self.components_dir else None, full=False, title=self.model_title())
-                engine = bool(found.usable)
-                here = [found.version] if found.installed and found.version else []
+                local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+                if local is not None:
+                    here = [local[1]["version"]]
+                else:
+                    found = shape_engine.find(shape, Path(self.components_dir) if self.components_dir else None, full=False, title=self.model_title())
+                    engine = bool(found.usable)
+                    here = [found.version] if found.installed and found.version else []
             else:
                 report = engine_component.status(Path(self.components_dir) if self.components_dir else None)
                 engine = bool(report.get("usable"))

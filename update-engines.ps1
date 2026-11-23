@@ -1,11 +1,11 @@
 ﻿# update-engines.ps1 - 원클릭 엔진 갱신 빌드 (Windows PowerShell 5.1 / PowerShell 7)
-# update-engines.sh 와 같은 동작: 순차 빌드 Strata -> Strata-Vision -> Strata-Poly -> Strata-Poly-Vision
+# update-engines.sh 와 같은 동작: 순차 빌드 Strata -> Strata-Vision -> Strata-Poly -> Strata-Poly-Vision -> HY-4 -> Inkling
 #   MSVC(vcvars64) 환경 자동 활성화, .venv-build(없으면 .venv) 자동 활성화, 로그는 화면 + build-logs/ 에 저장.
 #
 # 사용법:
-#   .\update-engines.ps1                       # 4개 전부
+#   .\update-engines.ps1                       # 6개 전부
 #   .\update-engines.ps1 -Pull                 # 먼저 git pull --ff-only
-#   .\update-engines.ps1 strata poly           # 일부만 (strata | vision | poly | poly-vision), 항상 위 순서
+#   .\update-engines.ps1 strata poly           # 일부만 (strata | vision | poly | poly-vision | hy4 | inkling), 항상 위 순서
 #   .\update-engines.ps1 -NoDeploy             # 빌드만, engine/ 은 건드리지 않음
 # 환경 변수(선택): VCVARS, CUDA_ROOT, CUDA_ARCH, JOBS, VISION_CUDA=ON, LLAMA_DIR, VISION_LLAMA_DIR
 # 배포 후 BUILD.json 도 strata launch(terminal/setup.py)와 같은 방식으로 갱신한다 (update-build-json.py).
@@ -16,7 +16,7 @@ param(
     [switch]$Pull,
     [switch]$NoDeploy,
     [Parameter(ValueFromRemainingArguments = $true)]
-    [ValidateSet('strata', 'vision', 'poly', 'poly-vision')]
+    [ValidateSet('strata', 'vision', 'poly', 'poly-vision', 'hy4', 'inkling')]
     [string[]]$Steps
 )
 
@@ -31,7 +31,7 @@ $VisionCuda = if ($env:VISION_CUDA) { $env:VISION_CUDA } else { 'OFF' }
 $LlamaDir = if ($env:LLAMA_DIR) { $env:LLAMA_DIR } else { Join-Path $Root 'third_party\llama.cpp' }
 $VisionLlamaDir = if ($env:VISION_LLAMA_DIR) { $env:VISION_LLAMA_DIR } else { Join-Path $Root 'third_party\llama.cpp-69f201a' }
 $VisionSrc = Join-Path $Root 'terminal\tools\vision'   # 0.2.16 이후 레이아웃: 루트에는 tools/vision 이 없다
-if (-not $Steps -or $Steps.Count -eq 0) { $Steps = @('strata', 'vision', 'poly', 'poly-vision') }
+if (-not $Steps -or $Steps.Count -eq 0) { $Steps = @('strata', 'vision', 'poly', 'poly-vision', 'hy4', 'inkling') }
 
 $Results = New-Object System.Collections.Generic.List[string]
 function Banner($t) { Write-Host "`n==== $t ====" -ForegroundColor Cyan }
@@ -102,6 +102,7 @@ function Find-Cuda {
             ForEach-Object { ($_ -replace '[\s.]', '') } | Where-Object { $_ } | Sort-Object -Unique
         $script:CudaArch = if ($caps) { $caps -join ';' } else { 'native' }
     }
+    $env:PATH = "$root\bin;$root\bin\x64;$env:PATH"
     Write-Host "  nvcc: $script:Nvcc   CUDA_ARCH: $script:CudaArch   JOBS: $Jobs"
 }
 
@@ -112,11 +113,11 @@ function Step($name, $src, $bdir, $target, $artifact, $dest, $check, [string[]]$
     $exe = Join-Path $bpath $artifact
     Banner "[$name] 구성 (cmake configure)  ->  $log"
     $cfg = @('-S', (Fwd $src), '-B', (Fwd $bpath), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release') + $defs
-    & cmake @cfg 2>&1 | Tee-Object -FilePath $log
+    & cmake @cfg 2>&1 | Tee-Object -FilePath $log | Out-Host
     $ok = ($LASTEXITCODE -eq 0)
     if ($ok) {
-        "`n==== [$name] 빌드 (target $target) ====" | Tee-Object -FilePath $log -Append
-        & cmake --build (Fwd $bpath) --target $target -j $Jobs 2>&1 | Tee-Object -FilePath $log -Append
+        "`n==== [$name] 빌드 (target $target) ====" | Tee-Object -FilePath $log -Append | Out-Host
+        & cmake --build (Fwd $bpath) --target $target -j $Jobs 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
         $ok = ($LASTEXITCODE -eq 0)
     }
     if (-not $ok) { $Results.Add("[실패] ${name}: 빌드 실패 (로그: $log)"); return $false }
@@ -143,8 +144,10 @@ function Step($name, $src, $bdir, $target, $artifact, $dest, $check, [string[]]$
         # BUILD.json: strata launch(setup.py)가 쓰는 것과 같은 스탬프 (src/vision_src 해시, version, archs ...)
         $what = if ($name -like '*Vision') { 'vision' } else { 'engine' }
         $kind = if ($name -like '*Poly*') { 'poly' } else { 'strata' }
+        if ($target -eq 'strata-hy4') { $kind = 'hy4' }
+        if ($target -eq 'strata-inkling') { $kind = 'inkling2' }
         $vis = if ($VisionCuda -eq 'ON') { 'gpu' } else { 'cpu' }
-        & python (Join-Path $Root 'update-build-json.py') $what --dir (Split-Path $dest) --kind $kind --arch $script:CudaArch --nvcc $script:Nvcc --vision $vis
+        & python (Join-Path $Root 'update-build-json.py') $what --dir (Split-Path $dest) --kind $kind --arch $script:CudaArch --nvcc $script:Nvcc --vision $vis | Out-Host
         if ($LASTEXITCODE -ne 0) {
             $Results.Add("[실패] ${name}: BUILD.json 갱신 실패 ($(Split-Path $dest)\BUILD.json) - 바이너리는 배포됨")
             return $false
@@ -208,6 +211,12 @@ try {
     }
     if ($done -and $Steps -contains 'poly-vision') {
         $done = Step 'Strata-Poly-Vision' $VisionSrc 'terminal/build-vision-poly' 'strata-vision' 'bin\strata-vision.exe' 'terminal\engine-poly\strata-vision.exe' 'version' ($visionDefs + @('-DSTRATA_VISION_POLY=ON', "-DLLAMA_DIR=$(Fwd $VisionLlamaDir)"))
+    }
+    if ($done -and $Steps -contains 'hy4') {
+        $done = Step 'HY-4' (Join-Path $Root 'engine') 'terminal/build-hy4' 'strata-hy4' 'strata-hy4.exe' 'terminal\engine-hy4\strata-hy4.exe' 'version' (@('-DSTRATA_ENABLE_CUDA=ON', '-DSTRATA_BUILD_TESTS=OFF', '-DSTRATA_BUILD_HY4=ON', '-DSTRATA_BUILD_INKLING=OFF') + $cudaDefs)
+    }
+    if ($done -and $Steps -contains 'inkling') {
+        $done = Step 'Inkling' (Join-Path $Root 'engine') 'terminal/build-inkling' 'strata-inkling' 'src\inkling2\strata-inkling.exe' 'terminal\engine-inkling2\strata-inkling.exe' 'version' (@('-DSTRATA_ENABLE_CUDA=ON', '-DSTRATA_BUILD_TESTS=OFF', '-DSTRATA_BUILD_INKLING=ON', '-DSTRATA_BUILD_INKLING2=ON') + $cudaDefs)
     }
     if ($done) { Banner '모든 빌드 완료' } else { Write-Host "`n빌드가 중단되었습니다. 위 로그를 확인하세요." -ForegroundColor Red; $rc = 1 }
 } catch {

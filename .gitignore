@@ -65,6 +65,8 @@ build-vision-cuda12.bat
 
 # terminal/setup.py outputs (engine, downloads) and release builds
 /terminal/engine/
+/terminal/engine-hy4/
+/terminal/engine-inkling2/
 /terminal/engine-sycl/
 /engine-sycl/
 /terminal/engine-feed/

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # update-engines.sh - 원클릭 엔진 갱신 빌드 (Linux / CUDA)
 #
-# 순차 빌드 (병렬 아님):  1) Strata  2) Strata-Vision  3) Strata-Poly  4) Strata-Poly-Vision
+# 순차 빌드 (병렬 아님):  1) Strata  2) Strata-Vision  3) Strata-Poly  4) Strata-Poly-Vision  5) HY-4  6) Inkling
 #   - 시스템 gcc/g++ 와 CUDA 툴킷(/usr/local/cuda 등)을 사용한다.
 #   - .venv-build / .venv 에 cmake+ninja 가 있으면 그것을, 없으면 시스템의 cmake / ninja 를 사용한다.
 #   - 빌드 로그는 화면에 그대로 출력되고, build-logs/ 에도 저장된다.
@@ -10,9 +10,9 @@
 #   - 배포 후 BUILD.json 도 strata launch(terminal/setup.py)와 같은 방식으로 갱신한다 (update-build-json.py).
 #
 # 사용법:
-#   ./update-engines.sh                      # 4개 전부, 현재 작업 트리의 소스로 빌드
+#   ./update-engines.sh                      # 6개 전부, 현재 작업 트리의 소스로 빌드
 #   ./update-engines.sh --pull               # 먼저 git pull --ff-only 로 최신 소스를 받는다
-#   ./update-engines.sh strata poly          # 일부만 (strata | vision | poly | poly-vision), 항상 위 순서로 실행
+#   ./update-engines.sh strata poly          # 일부만 (strata | vision | poly | poly-vision | hy4 | inkling), 항상 위 순서로 실행
 #   ./update-engines.sh --no-deploy          # 빌드만 하고 engine/ 은 건드리지 않는다
 #
 # 환경 변수(선택):
@@ -37,12 +37,12 @@ for a in "$@"; do
   case "$a" in
     --pull) DO_PULL=1 ;;
     --no-deploy) DEPLOY=0 ;;
-    strata|vision|poly|poly-vision) SELECTED+=("$a") ;;
+    strata|vision|poly|poly-vision|hy4|inkling) SELECTED+=("$a") ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "알 수 없는 인자: $a  (--help 참고)"; exit 2 ;;
   esac
 done
-[ ${#SELECTED[@]} -eq 0 ] && SELECTED=(strata vision poly poly-vision)
+[ ${#SELECTED[@]} -eq 0 ] && SELECTED=(strata vision poly poly-vision hy4 inkling)
 want() { local s; for s in "${SELECTED[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
 
 banner() { printf '\n\033[1;36m==== %s ====\033[0m\n' "$*"; }
@@ -89,6 +89,7 @@ detect_cuda() {
   [ -x "$root/bin/nvcc" ] || die "nvcc 를 찾지 못했습니다. CUDA_ROOT=<툴킷 경로> 로 지정하세요."
   NVCC="$root/bin/nvcc"
   export PATH="$root/bin:$PATH"
+  export LD_LIBRARY_PATH="$root/lib64:$root/targets/$(uname -m)-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   if [ -z "${CUDA_ARCH:-}" ]; then
     CUDA_ARCH="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '\r .' | sort -u | paste -sd';')"
     [ -z "$CUDA_ARCH" ] && CUDA_ARCH="native"
@@ -121,12 +122,16 @@ step_build() {
     local target_path="$ROOT/$dest"
     mkdir -p "$(dirname "$target_path")"
     [ -f "$target_path" ] && cp -f "$target_path" "$target_path.previous"
-    if ! cp -f "$exe" "$target_path" && chmod +x "$target_path"; then
+    if ! { cp -f "$exe" "$target_path" && chmod +x "$target_path"; }; then
       RESULTS+=("✗ $name: 배포 실패 — $dest 를 사용 중인 서버/프로세스를 종료하세요 (빌드 산출물: $exe)"); return 1
     fi
     # BUILD.json: strata launch(setup.py)가 쓰는 것과 같은 스탬프 (src/vision_src 해시, version, archs ...)
     local what=engine kind=strata vis=cpu
     [[ "$name" == *Vision ]] && what=vision; [[ "$name" == *Poly* ]] && kind=poly; [ "$VISION_CUDA" = "ON" ] && vis=gpu
+    case "$target" in
+      strata-hy4) kind=hy4 ;;
+      strata-inkling) kind=inkling2 ;;
+    esac
     if ! python3 "$ROOT/update-build-json.py" "$what" --dir "terminal/$(basename "$(dirname "$dest")")" --kind "$kind" --arch "$CUDA_ARCH" --nvcc "$NVCC" --vision "$vis"; then
       RESULTS+=("✗ $name: BUILD.json 갱신 실패 ($(dirname "$dest")/BUILD.json) — 바이너리는 배포됨"); return 1
     fi
@@ -169,6 +174,10 @@ run_all() {
       -DSTRATA_BUILD_POLY=ON "-DSTRATA_GGML_DIR=$LLAMA_DIR" || return 1; }
   want poly-vision && { step_build Strata-Poly-Vision "$VISION_SRC" terminal/build-vision-poly-linux strata-vision bin/strata-vision terminal/engine-poly-linux/strata-vision version \
       "${VISION_DEFS[@]}" -DSTRATA_VISION_POLY=ON "-DLLAMA_DIR=$VISION_LLAMA_DIR" || return 1; }
+  want hy4 && { step_build HY-4 "$ROOT/engine" terminal/build-hy4-linux strata-hy4 strata-hy4 terminal/engine-hy4/strata-hy4 version \
+      -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_BUILD_HY4=ON -DSTRATA_BUILD_INKLING=OFF "${CUDA_DEFS[@]}" || return 1; }
+  want inkling && { step_build Inkling "$ROOT/engine" terminal/build-inkling-linux strata-inkling src/inkling2/strata-inkling terminal/engine-inkling2/strata-inkling version \
+      -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF -DSTRATA_BUILD_INKLING=ON -DSTRATA_BUILD_INKLING2=ON "${CUDA_DEFS[@]}" || return 1; }
   return 0
 }
 run_all
