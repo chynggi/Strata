@@ -11261,7 +11261,7 @@ def shape_engine_step(a, gpu, vision, *, hip: bool = False, cuda_tk=None):
                 meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
                 lib_dirs = cuda_lib_dirs(cuda_tk) if (not hip and not sys.platform == "darwin") else []
                 return llama, eng, meta, lib_dirs, gpu, "none"
-    local = None if hip or getattr(a, "backend", None) in ("hip", "sycl") else shape_engine.checkout_cuda_build(ROOT, shape)
+    local = None if hip else shape_engine.checkout_cuda_build(ROOT, shape, backend=getattr(a, "backend", None))
     if local is not None:
         exe_path, meta = local
         SHAPE_ENGINE["local_exe"] = str(exe_path)
@@ -11864,7 +11864,8 @@ def hy4_fetch(a, name: str, folder: Path, own: bool) -> Path:
     fail(f"no source lists {name}")
 
 
-def hy4_tokenizer_dir(model: Path, out: Path, engine: Path | None, a=None, folder: Path | None = None, own: bool = False, data: Path | None = None) -> Path | None:
+def hy4_tokenizer_dir(model: Path, out: Path, engine: Path | None, a=None, folder: Path | None = None, own: bool = False, data: Path | None = None,
+                      *, lib_dirs=()) -> Path | None:
     """The tokenizer directory serve reads, from the model file or companion files:
     1) already populated (`vocab.json` + `chat_template.jinja`);
     2) Section 0 read directly in Python (3.14 `compression.zstd` or `zstandard`);
@@ -11908,7 +11909,7 @@ def hy4_tokenizer_dir(model: Path, out: Path, engine: Path | None, a=None, folde
         env = dict(os.environ)
         var = "PATH" if WIN else ("DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH")
         eng_dir = str(Path(engine).resolve().parent)
-        env[var] = os.pathsep.join([eng_dir, env[var]]) if env.get(var) else eng_dir
+        env[var] = os.pathsep.join([eng_dir, *lib_dirs] + ([env[var]] if env.get(var) else []))
         try:
             run([str(engine), "--export-tokenizer", str(model), str(raw)], env=env)
             if (raw / "tokenizer.hf.json").is_file() and (raw / "chat_template.jinja").is_file():
@@ -12035,7 +12036,8 @@ def install_hy4_flash(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopt
 
     step(6, "preparing the model for Strata")
     data, _ = data_folder_for(a)
-    tokdir = hy4_tokenizer_dir(paths[files[0]], data / "packs" / tag.lower() / "tokenizer", engine_program, a=a, folder=folder, own=own, data=data)
+    tokdir = hy4_tokenizer_dir(paths[files[0]], data / "packs" / tag.lower() / "tokenizer", engine_program, a=a, folder=folder, own=own,
+                              data=data, lib_dirs=lib_dirs)
     if tokdir is None:
         warn("the tokenizer is read from the model file by the engine, which is not installed yet: run this again once it is (nothing is downloaded twice)")
         tokdir = data / "packs" / tag.lower() / "tokenizer"
@@ -12258,7 +12260,8 @@ def inkling_fetch(a, name: str, folder: Path, own: bool) -> Path:
     fail(f"no source lists {name}")
 
 
-def inkling_tokenizer_dir(a, model: Path, folder: Path, out: Path, engine: Path | None, own: bool, *, data: Path | None = None) -> Path | None:
+def inkling_tokenizer_dir(a, model: Path, folder: Path, out: Path, engine: Path | None, own: bool, *, data: Path | None = None,
+                          lib_dirs=()) -> Path | None:
     """Build serve's o200k tokenizer directory from Section 0 manifest, --export-tokenizer, companion files, or public HF fallback."""
     sys.path.insert(0, str(ROOT / "tools"))
     import inkling_tokenizer
@@ -12291,7 +12294,7 @@ def inkling_tokenizer_dir(a, model: Path, folder: Path, out: Path, engine: Path 
         env = dict(os.environ)
         var = "PATH" if WIN else ("DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH")
         eng_dir = str(Path(engine).resolve().parent)
-        env[var] = os.pathsep.join([eng_dir, env[var]]) if env.get(var) else eng_dir
+        env[var] = os.pathsep.join([eng_dir, *lib_dirs] + ([env[var]] if env.get(var) else []))
         try:
             run([str(engine), "--export-tokenizer", str(model), str(raw)], env=env)
         except (SystemExit, OSError):
@@ -12430,7 +12433,8 @@ def install_inkling2(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         ok(f"model file: {model_file}")
 
     step(6, "preparing the model for Strata")
-    tokdir = inkling_tokenizer_dir(a, model_file, folder, data / "packs" / tag.lower() / "tokenizer", engine_program, own, data=data)
+    tokdir = inkling_tokenizer_dir(a, model_file, folder, data / "packs" / tag.lower() / "tokenizer", engine_program, own,
+                                  data=data, lib_dirs=lib_dirs)
     if tokdir is None:
         warn("the tokenizer could not be extracted yet; run setup again once the engine or tokenizer.json is available")
         tokdir = data / "packs" / tag.lower() / "tokenizer"

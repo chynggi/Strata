@@ -152,7 +152,7 @@ def root(shape: str, components: Path | None = None) -> Path:
     return shapes_dir(components) / shape
 
 
-def checkout_cuda_build(src: Path, shape: str) -> tuple[Path, dict] | None:
+def checkout_cuda_build(src: Path, shape: str, *, backend: str | None = None) -> tuple[Path, dict] | None:
     """Find a local HY-4 or Inkling CUDA build beside the checkout's setup.py."""
     if shape not in CUSTOM_SHAPES or not (src.parent / "engine" / "CMakeLists.txt").is_file():
         return None
@@ -166,8 +166,10 @@ def checkout_cuda_build(src: Path, shape: str) -> tuple[Path, dict] | None:
         return None
     if (isinstance(meta, dict) and meta.get("source") == "local" and meta.get("backend") == "cuda"
             and isinstance(meta.get("version"), str) and meta.get("shape") == shape and meta.get("entrypoint") == exe.name
-            and ec.detect_backend()[0] == "cuda"):
-        return exe, meta
+            and (backend or ec.detect_backend()[0]) == "cuda"):
+        archs = [f"sm_{arch}" for arch in (meta.get("archs") or []) if isinstance(arch, int)]
+        if not archs or all(ec.arch_covers(archs, [card]) for card in ec.cuda_archs_present()):
+            return exe, meta
     return None
 
 

@@ -2461,7 +2461,7 @@ class StrataEngine:
                 self._quarantine_control(undrained, born, lines_q, slot if undrained == "BADM" else None, holding)
                 holding, handed = False, True
             bdone_in = False
-            if phase == "slot" and slot is not None and out and out[-1] in self.eos_ids and same:
+            if phase == "slot" and slot is not None and out and out[-1] in self.eos_ids and self.gen == born:
                 bd = self._bdone_after_eos(slot, q=sq[slot])    # (#1869) the slot's figures, not the admission's
                 if bd is not None:
                     self._apply_bdone(bd.split())
@@ -9574,7 +9574,8 @@ def _ensure_shape_tokenizer(cfg: dict, tpath: Path) -> bool:
                 except Exception:                       # noqa: BLE001
                     pass
     # 3. Export via the shape engine binary (`--export-tokenizer`)
-    if model_path is not None and model_path.is_file() and model_path.suffix.lower() == ".strata":
+    export_formats = (".strata", ".gguf") if is_ink else (".strata",)
+    if model_path is not None and model_path.is_file() and model_path.suffix.lower() in export_formats:
         try:
             resolved = with_component_engine(dict(cfg))
             exe_raw = resolved.get("exe")

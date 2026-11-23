@@ -1119,6 +1119,20 @@ class Runner:
         except Exception:                                    # noqa: BLE001
             return None
 
+    def checkout_shape_engine(self, shape: str):
+        from strata_control import shape_engine
+        local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+        if local is not None:
+            tag = self.custom_tag or self.catalog.tag_of(self.s.family, self.s.model)
+            path = self.catalog.installed_config(tag, vision=self.s.vision)
+            if path is not None:
+                try:
+                    if read_config(path).get("backend") not in (None, "", "cuda"):
+                        return None
+                except (OSError, ValueError):
+                    pass                                     # setup can replace an unreadable config
+        return local
+
     def ensure_shape_engine(self, shape: str) -> None:
         """Step 1 for a model of its own shape: the engine of that shape is installed (and the feed's newer one fetched), next to the Strata engine, which is not touched."""
         import argparse
@@ -1127,7 +1141,7 @@ class Runner:
         root = Path(self.components_dir) if self.components_dir else None
         title = self.model_title()
         name = shape_engine.shown(shape, title)
-        local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+        local = self.checkout_shape_engine(shape)
         if local is not None:
             exe, meta = local
             self.emit("engine", f"Using local {name} engine {meta['version']} at {exe}.", 100)
@@ -2100,7 +2114,7 @@ class Runner:
         if shape:
             from strata_control import shape_engine
             if base.get("exe") == shape_engine.reference(shape):
-                local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+                local = shape_engine.checkout_cuda_build(self.catalog.src, shape, backend=base.get("backend"))
                 if local is not None:
                     exe, meta = local
                     base.update(exe=str(exe), lib_dirs=meta.get("cuda_dirs") or [], backend="cuda")
@@ -2848,7 +2862,7 @@ class Runner:
             shape = self.model_shape()
             if shape:
                 from strata_control import shape_engine
-                local = shape_engine.checkout_cuda_build(self.catalog.src, shape)
+                local = self.checkout_shape_engine(shape)
                 if local is not None:
                     here = [local[1]["version"]]
                 else:
