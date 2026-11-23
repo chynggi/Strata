@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -3019,12 +3020,19 @@ struct InkCudaRunner {
             if (M <= 16 || mode == 2) {
                 const int n_sp = (M == 1) ? (is_swa ? 16 : kInkAttnMaxSplits) : kInkAttnSplits;
                 dim3 gsp(kInkKVHeads, n_sp, M);
-                k_ink_flash_gqa_splitk<<<gsp, 128, 0, st>>>(
-                    d_q, d_rel_table, d_sinks,
-                    kv_desc[visit], (mode == 1) ? d_slots : nullptr, slot0, d_pos,
-                    (mode == 2) ? d_k : nullptr, (mode == 2) ? d_v : nullptr,
-                    (mode == 2) ? d_tree_anc : nullptr, (mode == 2) ? d_tree_dep : nullptr,
-                    p0_val, d_attn_pm, d_attn_pl, d_attn_po, M, n_sp);
+                const auto launch_splitk = [&](auto fp16_only) {
+                    k_ink_flash_gqa_splitk<decltype(fp16_only)::value><<<gsp, 128, 0, st>>>(
+                        d_q, d_rel_table, d_sinks,
+                        kv_desc[visit], (mode == 1) ? d_slots : nullptr, slot0, d_pos,
+                        (mode == 2) ? d_k : nullptr, (mode == 2) ? d_v : nullptr,
+                        (mode == 2) ? d_tree_anc : nullptr, (mode == 2) ? d_tree_dep : nullptr,
+                        p0_val, d_attn_pm, d_attn_pl, d_attn_po, M, n_sp);
+                };
+                if (kv_desc[visit].kv_fmt == static_cast<uint8_t>(InkKvDtype::FP16)) {
+                    launch_splitk(std::true_type{});
+                } else {
+                    launch_splitk(std::false_type{});
+                }
                 k_ink_flash_gqa_merge<<<gr, 128, 0, st>>>(d_attn_pm, d_attn_pl, d_attn_po, d_gate_attn, d_attn_out, M, n_sp);
             } else if (mode == 0 && M >= 128 && (cur_cc >= 70 || cur_cc == 60) && ensure_pf_attn(kInkPfKvTile)) {
                 // O(1)-VRAM KV-Tiled Online-Softmax Tensor Core Prefill Attention (fixed <= ~114 MiB even at 256K+ ctx!)

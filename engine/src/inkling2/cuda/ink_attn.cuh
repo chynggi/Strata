@@ -53,7 +53,8 @@ struct InkKvVisitDesc {
     uint8_t  kv_fmt;     // 0=FP16, 1=FP8, 2=K8V8, 3=K8V4
 };
 
-// Unified inline 4-dim KV loader for all 4 formats (FP16 / FP8 / K8V8 / K8V4) + transparent Host KV Offload!
+// Unified inline 4-dim KV loader. Split-K can select the FP16-only path before launching.
+template <bool Fp16Only = false>
 __device__ __forceinline__ void ink_kv_load4(
     const InkKvVisitDesc& kv, int sl, int p_idx, int kh, int lane, float4& kv4, float4& vv4) {
     const bool use_host = (!kv.is_swa && kv.host_cap > 0 && p_idx >= kv.dev_cap);
@@ -61,7 +62,7 @@ __device__ __forceinline__ void ink_kv_load4(
     const int pos_l  = use_host ? (p_idx - kv.dev_cap) : p_idx;
     const size_t hbase = ((size_t)sl * stride + pos_l) * kInkKVHeads + kh;
     const size_t base  = hbase * kInkHeadDim + (size_t)lane * 4;
-    if (kv.kv_fmt == 0) {
+    if (Fp16Only || kv.kv_fmt == 0) {
         const __half* pk = use_host ? kv.h_k_f16 : kv.k_f16;
         const __half* pv = use_host ? kv.h_v_f16 : kv.v_f16;
         const uint2 k2 = *(const uint2*)(pk + base);
@@ -476,6 +477,7 @@ __global__ void __launch_bounds__(128) k_ink_flash_gqa(
 constexpr int kInkAttnSplits = 8;
 constexpr int kInkAttnMaxSplits = 32;
 
+template <bool Fp16Only>
 __global__ void __launch_bounds__(128) k_ink_flash_gqa_splitk(
     const float* __restrict__ q,          // [M, 24, 128]
     const float* __restrict__ rel_table,  // [M, 24, 1025]
@@ -566,7 +568,7 @@ __global__ void __launch_bounds__(128) k_ink_flash_gqa_splitk(
         } else {
             if (!kv.is_swa && (kp < 0 || kp >= kv.cap_pos)) continue;
             const int p_idx = kv.is_swa ? (kp % kv.cap_pos) : kp;
-            ink_kv_load4(kv, sl, p_idx, kh, lane, kv4, vv4);
+            ink_kv_load4<Fp16Only>(kv, sl, p_idx, kh, lane, kv4, vv4);
         }
         attend3(kv4, vv4, kp);
     }
