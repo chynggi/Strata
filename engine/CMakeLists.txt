@@ -37,6 +37,12 @@ if(STRATA_ENABLE_SYCL)
   return()
 endif()
 add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
+# MSVC's STL, which every Windows build uses (cl, nvcc's host compiler, ROCm's clang++), refuses std::stable_sort of a type
+# aligned past 8 bytes (strata-poly's 16-byte MMQ tile) unless this opts in to the correct alignment.  It has to come
+# from the command line: nvcc includes cuda_runtime.h before the first line of a .cu file (PR #200, #198).
+if(WIN32)
+  add_compile_definitions(_ENABLE_EXTENDED_ALIGNED_STORAGE)
+endif()
 # issue #31: release builds keep a PDB beside the exe (not shipped in it), so a minidump from a stalled engine can
 # be read back to the exact source line
 if(MSVC AND CMAKE_BUILD_TYPE STREQUAL "Release")

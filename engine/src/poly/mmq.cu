@@ -82,8 +82,11 @@ bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
     }
     if (w_cols % ggml_blck_size(t) != 0) return false;
     const bool fallback = w_rows % 128 != 0;
-    // MXFP4's instance is built for 12.0a on Blackwell (CMakeLists.txt): another Blackwell has no image of it
+#if !defined(GGML_USE_HIP)
+    // MXFP4's instance is built for 12.0a on Blackwell (CMakeLists.txt): another Blackwell has no image of it.  Not on
+    // HIP, whose instance is built for its architectures as given, and where an AMD card's cc is above any NVIDIA one.
     if (t == GGML_TYPE_MXFP4 && dev.cc >= GGML_CUDA_CC_BLACKWELL && dev.cc != GGML_CUDA_CC_BLACKWELL) return false;
+#endif
     for (int J = 8; J <= 128; J += 8) {
         const ggml_cuda_mmq_config c = ggml_cuda_mmq_get_config(t, J, fallback, dev.cc);
         if (c.type != GGML_TYPE_COUNT && mmq_get_nbytes_shared(c, dev.cc) <= dev.smpbo) return true;
