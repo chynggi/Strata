@@ -467,7 +467,7 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
     if (io.mode == PleIo::Mmap && io.lock && impl_->data != nullptr) {
 #if defined(_WIN32)
         // Windows has no mlock: the platform helper raises the process's minimum working set and
-        // VirtualLocks the mapped table instead (ordinary accounts hold the privilege). A failure
+        // reads the mapped table ahead in chunks before VirtualLock (ordinary accounts hold the privilege). A failure
         // falls back to touching the pages, i.e. plain mmap behaviour, with a warning - same as POSIX.
         // A table that is more than half of the RAM leaves the rest of the process little (the locked pages cannot be
         // paged out): say so, and go on (recommend, never force).
@@ -477,7 +477,7 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
             std::fprintf(stderr, "strata: warning: --ple-io ram locks %.1f GiB, more than half of this PC's %.1f GiB of RAM\n",
                          (double) need / (1ull << 30), (double) ms.ullTotalPhys / (1ull << 30));
         const strata::platform::LockResult lr =
-            strata::platform::lock_resident((void*) impl_->data, need);
+            strata::platform::lock_resident_file((void*) impl_->data, need);
         if (lr.ok && lr.locked_bytes >= need) {
             impl_->locked = true;
         } else {

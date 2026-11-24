@@ -22,6 +22,11 @@ struct LockResult {
 /// Lock [p, p + bytes) into physical memory. Partial success is reported, not hidden.
 LockResult lock_resident(void* p, uint64_t bytes);
 
+#if defined(_WIN32)
+/// Lock a file mapping, asking Windows to read each chunk before taking the lock.
+LockResult lock_resident_file(void* p, uint64_t bytes);
+#endif
+
 /// Pin-by-need: lock several disjoint regions (the holes between the registered ranges of an arena).  The Windows
 /// working-set minimum is raised ONCE for the total (lock_resident per region would add its margin every time);
 /// stops at the first refusal and reports the bytes locked so far.  Undo each region with unlock_resident.

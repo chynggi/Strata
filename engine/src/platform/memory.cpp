@@ -6,6 +6,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dxgi1_4.h>
+#include <algorithm>
 #include <cstring>
 #else
 #include <algorithm>
@@ -20,7 +21,7 @@
 namespace strata::platform {
 
 #if defined(_WIN32)
-LockResult lock_resident(void* p, uint64_t bytes) {
+static LockResult lock_resident_impl(void* p, uint64_t bytes, bool read_ahead) {
     LockResult r;
     if (p == nullptr || bytes == 0) { r.note = "nothing to lock"; return r; }
     HANDLE self = GetCurrentProcess();
@@ -45,6 +46,17 @@ LockResult lock_resident(void* p, uint64_t bytes) {
     uint8_t* base = (uint8_t*) p;
     for (uint64_t off = 0; off < bytes; off += chunk) {
         const uint64_t n = bytes - off < chunk ? bytes - off : chunk;
+        if (read_ahead) {
+            // Queue up to four adjacent ranges together so a cold mapping uses larger reads.
+            // VirtualLock still faults in any pages that Windows did not prefetch.
+            constexpr uint64_t range_bytes = chunk / 4;
+            WIN32_MEMORY_RANGE_ENTRY ranges[4];
+            ULONG_PTR count = 0;
+            for (uint64_t start = 0; start < n; start += range_bytes) {
+                ranges[count++] = {base + off + start, (SIZE_T) std::min(range_bytes, n - start)};
+            }
+            read_ahead = PrefetchVirtualMemory(self, count, ranges, 0) != FALSE;
+        }
         if (!VirtualLock(base + off, (SIZE_T) n)) {
             r.note = "VirtualLock stopped at " + std::to_string((unsigned long long) (off >> 20)) + " of " +
                      std::to_string((unsigned long long) (bytes >> 20)) + " MiB (error " +
@@ -57,6 +69,14 @@ LockResult lock_resident(void* p, uint64_t bytes) {
     r.ok = true;
     r.note = "locked " + std::to_string((unsigned long long) (bytes >> 20)) + " MiB via working-set minimum + VirtualLock";
     return r;
+}
+
+LockResult lock_resident(void* p, uint64_t bytes) {
+    return lock_resident_impl(p, bytes, false);
+}
+
+LockResult lock_resident_file(void* p, uint64_t bytes) {
+    return lock_resident_impl(p, bytes, true);
 }
 
 LockResult lock_resident_ranges(const std::vector<std::pair<void*, uint64_t>>& regions) {
