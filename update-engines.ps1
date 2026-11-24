@@ -1,6 +1,7 @@
 ﻿# update-engines.ps1 - 원클릭 엔진 갱신 빌드 (Windows PowerShell 5.1 / PowerShell 7)
 # update-engines.sh 와 같은 동작: 순차 빌드 Strata -> Strata-Vision -> Strata-Poly -> Strata-Poly-Vision -> HY-4 -> Inkling
 #   MSVC(vcvars64) 환경 자동 활성화, .venv-build(없으면 .venv) 자동 활성화, 로그는 화면 + build-logs/ 에 저장.
+#   CMake 캐시의 컴파일러가 바뀌면 기존 빌드를 보존하고 별도 빌드 폴더를 사용한다.
 #
 # 사용법:
 #   .\update-engines.ps1                       # 6개 전부
@@ -71,6 +72,7 @@ function Import-Msvc {
     }
     $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
     if (-not $cl) { Fail 'vcvars 이후에도 cl.exe 가 PATH 에 없습니다' }
+    $script:MsvcCompiler = Fwd $cl.Source
     Write-Host "  cl: $($cl.Source)"
 }
 
@@ -106,14 +108,54 @@ function Find-Cuda {
     Write-Host "  nvcc: $script:Nvcc   CUDA_ARCH: $script:CudaArch   JOBS: $Jobs"
 }
 
+function Find-CompilerMismatch($bpath, $compilers) {
+    $cache = Join-Path $bpath 'CMakeCache.txt'
+    if (-not (Test-Path -LiteralPath $cache -PathType Leaf)) { return }
+    foreach ($line in Get-Content -LiteralPath $cache -ErrorAction Stop) {
+        if ($line -match '^(CMAKE_(?:C|CXX|CUDA)_COMPILER):[^=]+=(.*)$') {
+            $key = $Matches[1]
+            $cached = Fwd $Matches[2]
+            if ($compilers.Contains($key) -and $cached -ne $compilers[$key]) {
+                return "${key}: $cached -> $($compilers[$key])"
+            }
+        }
+    }
+}
+
 # Step <이름> <소스> <빌드폴더> <타깃> <산출물> <배포 대상> <version|help> <cmake -D 인자...>
 function Step($name, $src, $bdir, $target, $artifact, $dest, $check, [string[]]$defs) {
     $log = Join-Path $LogDir "$Stamp-$name.log"
     $bpath = Join-Path $Root $bdir
-    $exe = Join-Path $bpath $artifact
     Banner "[$name] 구성 (cmake configure)  ->  $log"
-    $cfg = @('-S', (Fwd $src), '-B', (Fwd $bpath), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release') + $defs
-    & cmake @cfg 2>&1 | Tee-Object -FilePath $log | Out-Host
+    $compilers = [ordered]@{
+        CMAKE_C_COMPILER = $script:MsvcCompiler
+        CMAKE_CXX_COMPILER = $script:MsvcCompiler
+    }
+    if ($defs -contains "-DCMAKE_CUDA_COMPILER=$script:Nvcc") {
+        $compilers['CMAKE_CUDA_COMPILER'] = $script:Nvcc
+    }
+    $mismatch = Find-CompilerMismatch $bpath $compilers
+    if ($mismatch) {
+        # Keep the old cache and objects at their original paths. Reuse the new tree on later updates.
+        $identity = ($compilers.Values -join "`n").ToLowerInvariant()
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
+        } finally {
+            $sha.Dispose()
+        }
+        $hash = [BitConverter]::ToString($digest, 0, 6).Replace('-', '').ToLowerInvariant()
+        $bdir = "$bdir-msvc-$hash"
+        $bpath = Join-Path $Root $bdir
+        "  CMake 캐시의 컴파일러 변경 감지 ($mismatch)" | Tee-Object -FilePath $log | Out-Host
+        $conflict = Find-CompilerMismatch $bpath $compilers
+        if ($conflict) { Fail "대체 빌드 폴더의 컴파일러가 일치하지 않습니다: $bpath ($conflict)" }
+    }
+    "  빌드 폴더: $bpath" | Tee-Object -FilePath $log -Append | Out-Host
+    $exe = Join-Path $bpath $artifact
+    $cfg = @('-S', (Fwd $src), '-B', (Fwd $bpath), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+        "-DCMAKE_C_COMPILER=$script:MsvcCompiler", "-DCMAKE_CXX_COMPILER=$script:MsvcCompiler") + $defs
+    & cmake @cfg 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
     $ok = ($LASTEXITCODE -eq 0)
     if ($ok) {
         "`n==== [$name] 빌드 (target $target) ====" | Tee-Object -FilePath $log -Append | Out-Host
