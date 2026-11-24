@@ -1,7 +1,7 @@
 ﻿# update-engines.ps1 - 원클릭 엔진 갱신 빌드 (Windows PowerShell 5.1 / PowerShell 7)
 # update-engines.sh 와 같은 동작: 순차 빌드 Strata -> Strata-Vision -> Strata-Poly -> Strata-Poly-Vision -> HY-4 -> Inkling
 #   MSVC(vcvars64) 환경 자동 활성화, .venv-build(없으면 .venv) 자동 활성화, 로그는 화면 + build-logs/ 에 저장.
-#   CMake 캐시의 컴파일러가 바뀌면 기존 빌드를 보존하고 별도 빌드 폴더를 사용한다.
+#   도구 체인이 바뀌면 해당 빌드 폴더를 초기화하고 CMake 구성부터 다시 실행한다.
 #
 # 사용법:
 #   .\update-engines.ps1                       # 6개 전부
@@ -98,6 +98,11 @@ function Find-Cuda {
     }
     if (-not $root -or -not (Test-Path "$root\bin\nvcc.exe")) { Fail 'nvcc.exe 를 찾지 못했습니다. $env:CUDA_ROOT 로 지정하세요.' }
     $script:Nvcc = Fwd "$root\bin\nvcc.exe"
+    $nvccVersion = & $script:Nvcc --version | Out-String
+    if ($LASTEXITCODE -ne 0 -or $nvccVersion -notmatch '\bV(\d+(?:\.\d+)+)\b') {
+        Fail "nvcc 버전을 확인할 수 없습니다: $script:Nvcc"
+    }
+    $script:CudaVersion = $Matches[1]
     $script:CudaArch = $env:CUDA_ARCH
     if (-not $script:CudaArch) {
         $caps = & nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null |
@@ -122,6 +127,19 @@ function Find-CompilerMismatch($bpath, $compilers) {
     }
 }
 
+function Reset-BuildDirectory($bpath) {
+    $directory = Get-Item -LiteralPath $bpath -ErrorAction Stop
+    $terminal = Get-Item -LiteralPath (Join-Path $Root 'terminal') -ErrorAction Stop
+    $buildNames = 'build', 'build-vision', 'build-poly', 'build-vision-poly', 'build-hy4', 'build-inkling'
+    if ($terminal.FullName -ne (Join-Path $Root 'terminal') -or
+        $directory.Parent.FullName -ne $terminal.FullName -or $directory.Name -notin $buildNames -or
+        (($terminal.Attributes -bor $directory.Attributes) -band [IO.FileAttributes]::ReparsePoint)) {
+        Fail "초기화할 수 없는 빌드 폴더입니다: $bpath"
+    }
+    # Directory.Delete does not follow junctions or symbolic links inside this generated directory.
+    [IO.Directory]::Delete($directory.FullName, $true)
+}
+
 # Step <이름> <소스> <빌드폴더> <타깃> <산출물> <배포 대상> <version|help> <cmake -D 인자...>
 function Step($name, $src, $bdir, $target, $artifact, $dest, $check, [string[]]$defs) {
     $log = Join-Path $LogDir "$Stamp-$name.log"
@@ -134,22 +152,21 @@ function Step($name, $src, $bdir, $target, $artifact, $dest, $check, [string[]]$
     if ($defs -contains "-DCMAKE_CUDA_COMPILER=$script:Nvcc") {
         $compilers['CMAKE_CUDA_COMPILER'] = $script:Nvcc
     }
+    $toolchain = ConvertTo-Json -Compress -InputObject ([ordered]@{
+        compilers = $compilers
+        msvc = (Get-Item -LiteralPath $script:MsvcCompiler -ErrorAction Stop).VersionInfo.FileVersion
+        windowsSdk = $env:WindowsSDKVersion
+        cuda = if ($compilers.Contains('CMAKE_CUDA_COMPILER')) { $script:CudaVersion }
+    })
+    $toolchainFile = Join-Path $bpath '.strata-toolchain.json'
     $mismatch = Find-CompilerMismatch $bpath $compilers
+    if (-not $mismatch -and (Test-Path -LiteralPath $toolchainFile -PathType Leaf) -and
+        ([string](Get-Content -LiteralPath $toolchainFile -Raw -ErrorAction Stop)).Trim() -ne $toolchain) {
+        $mismatch = 'MSVC, Windows SDK 또는 CUDA 설정 변경'
+    }
     if ($mismatch) {
-        # Keep the old cache and objects at their original paths. Reuse the new tree on later updates.
-        $identity = ($compilers.Values -join "`n").ToLowerInvariant()
-        $sha = [Security.Cryptography.SHA256]::Create()
-        try {
-            $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
-        } finally {
-            $sha.Dispose()
-        }
-        $hash = [BitConverter]::ToString($digest, 0, 6).Replace('-', '').ToLowerInvariant()
-        $bdir = "$bdir-msvc-$hash"
-        $bpath = Join-Path $Root $bdir
-        "  CMake 캐시의 컴파일러 변경 감지 ($mismatch)" | Tee-Object -FilePath $log | Out-Host
-        $conflict = Find-CompilerMismatch $bpath $compilers
-        if ($conflict) { Fail "대체 빌드 폴더의 컴파일러가 일치하지 않습니다: $bpath ($conflict)" }
+        "  도구 체인 변경 감지 ($mismatch). 빌드 폴더 초기화: $bpath" | Tee-Object -FilePath $log | Out-Host
+        Reset-BuildDirectory $bpath
     }
     "  빌드 폴더: $bpath" | Tee-Object -FilePath $log -Append | Out-Host
     $exe = Join-Path $bpath $artifact
@@ -158,6 +175,7 @@ function Step($name, $src, $bdir, $target, $artifact, $dest, $check, [string[]]$
     & cmake @cfg 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
     $ok = ($LASTEXITCODE -eq 0)
     if ($ok) {
+        Set-Content -LiteralPath $toolchainFile -Value $toolchain -Encoding UTF8 -ErrorAction Stop
         "`n==== [$name] 빌드 (target $target) ====" | Tee-Object -FilePath $log -Append | Out-Host
         & cmake --build (Fwd $bpath) --target $target -j $Jobs 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
         $ok = ($LASTEXITCODE -eq 0)
