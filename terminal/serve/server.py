@@ -4327,17 +4327,7 @@ class Service:
         self.tool_markup_retry = os.environ.get("STRATA_TOOL_MARKUP_RETRY", "1").strip().lower() not in ("0", "off", "false", "no")
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
-        self.stop_ids = end_token_ids(tokenizer)
-        self.hy4 = getattr(engine, "hy4_engine", False) is True      # the Hy4-Flash engine: its end tokens, its tagged texts that stay text in a message
-        self.inkling = getattr(engine, "inkling_engine", False) is True   # the Inkling-2-Mini engine: its end tokens & channel tags
-        if self.hy4:
-            self.stop_ids |= hy4_kind.end_ids(tokenizer)
-            self.literals = literal_tags(list(getattr(tokenizer, "control_tokens", ())) + hy4_kind.literal_tags(tokenizer))
-        elif self.inkling:
-            self.stop_ids |= inkling_kind.end_ids(tokenizer)
-            self.literals = literal_tags(list(getattr(tokenizer, "control_tokens", ())) + inkling_kind.literal_tags(tokenizer))
         self.family = None                            # the model family: set_family() below (None: the Qwen form)
-        self.parser_cls = parser_for_template(getattr(template, "source", None))   # reads the model's output (reasoning, content, tool calls): by the template's tool-call form
         # #37: the command line's options for every model: model_settings()'s overrides, and the keys main() writes
         # into each run config before its engine starts (gpu, replicas)
         self.overrides: dict = {}
@@ -4355,6 +4345,7 @@ class Service:
         end a reply, and how it writes a tool call."""
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))
         self.stop_ids = end_token_ids(tokenizer)
+        self.parser_cls = parser_for_template(getattr(self.template, "source", None))
         chatml = len(tokenizer.encode(IM_END, parse_special=True)) == 1
         pre = getattr(tokenizer, "pre", "")
         import serve.frontend as _frontend
@@ -4369,6 +4360,17 @@ class Service:
         # non-ChatML models only; every other model keeps EOS_IDS, as upstream has it
         if self.stop_ids and pre in POLY_PRE_TOKENIZERS:
             self.engine.eos_ids = frozenset(self.stop_ids)
+        self.hy4 = getattr(self.engine, "hy4_engine", False) is True
+        self.inkling = getattr(self.engine, "inkling_engine", False) is True
+        self._force_text = None
+        if self.hy4:
+            self.stop_ids |= hy4_kind.end_ids(tokenizer)
+            self.literals = literal_tags([*getattr(tokenizer, "control_tokens", ()), *hy4_kind.literal_tags(tokenizer)])
+            self._force_text = hy4_dialect.force_text
+        elif self.inkling:
+            self.stop_ids |= inkling_kind.end_ids(tokenizer)
+            self.literals = literal_tags([*getattr(tokenizer, "control_tokens", ()), *inkling_kind.literal_tags(tokenizer)])
+            self._force_text = inkling_dialect.force_text
         # the tokenizer's own tokens under the names a template knows them by (Gemma's starts with bos_token)
         special = getattr(tokenizer, "special_ids", None) or {}
         self.template_tokens = {name: tokenizer.decode([special[key]]) for name, key in (
@@ -4425,8 +4427,6 @@ class Service:
         self.family = family
         import serve.frontend as _frontend
         _frontend.use_family(family)
-
-    _force_text = None
 
     def force_text(self, force):
         """forced_call's opening of the call the reply must make, in this model's spelling."""
@@ -4778,6 +4778,7 @@ class Service:
             self.sampling_defaults = dict(sampling_defaults or {})
             self.effort_end = bool(effort_end)
             self._read_tokenizer(tok)
+            self.set_family("hy4" if self.hy4 else "inkling2" if self.inkling else None)
             self.apply_settings(settings)                 # #37: the new model's own settings, not the earlier one's
             self.read_shared(target["config"])
             self.config_path = target["config"]
@@ -4870,7 +4871,9 @@ class Service:
         can run, the loaded one first."""
         loaded = self.loaded()
         ctx = self.reported_ctx()
-        model = {"id": self.model, "object": "model", "status": {"value": "loaded"},
+        created = int(self.started_at)
+        model = {"id": self.model, "object": "model", "created": created, "owned_by": "strata",
+                 "status": {"value": "loaded"},
                  "max_model_len": ctx, "context_length": ctx, "max_context_length": ctx, "meta": {"n_ctx": ctx},
                  "architecture": {"input_modalities": ["text", "image"] if self.has_vision() else ["text"],
                                   "output_modalities": ["text"]}}
@@ -4884,7 +4887,8 @@ class Service:
             for e in self.models():
                 if e["current"] or e["status"] == "unavailable":
                     continue
-                other = {"id": e["id"], "object": "model", "source": "preset",   # llama-server's router: loads on use
+                other = {"id": e["id"], "object": "model", "created": created, "owned_by": "strata",
+                         "source": "preset",   # llama-server's router: loads on use
                          "status": {"value": "loading" if e["status"] == "loading" else "unloaded"},
                          **({"max_model_len": e["context"], "context_length": e["context"], "max_context_length": e["context"],
                              "meta": {"n_ctx": e["context"]}} if e["context"] else {}),
@@ -4895,7 +4899,8 @@ class Service:
                     other["aliases"] = names
                 data += [other, *({**other, "id": x, "alias_of": e["id"]} for x in names)]
         if self.images is not None:                       # the image model: POST /v1/images/generations
-            data.append({"id": self.images.model, "object": "model", "status": {"value": "loaded"},
+            data.append({"id": self.images.model, "object": "model", "created": created, "owned_by": "strata",
+                         "status": {"value": "loaded"},
                          "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]}})
         return data
 
@@ -4986,7 +4991,7 @@ class Service:
         strata-<model>.shared-settings.json: from the last time this model ran."""
         self.shared_path = str(Path(config_path).with_suffix("")) + ".shared-settings.json"
         try:
-            self.shared = load_shared_settings(self.shared_path)
+            self.shared = load_shared_settings(self.shared_path, hy4=self.hy4)
             if self.shared:
                 print("[strata] other apps use the Chat settings: " +
                       ", ".join(f"{k}={v}" for k, v in self.shared.items()), flush=True)
@@ -5018,7 +5023,8 @@ class Service:
     def check_model(self, req) -> dict | None:
         """#6621: reject mismatched Strata catalog model IDs (e.g. requesting `inkling-2-mini-sq-10` while Qwen is
         loaded) and, when strict_model is enabled (--strict-model / strict_model: true / STRATA_STRICT_MODEL=1), any
-        unrecognized model ID.  Generic client placeholders ('gpt-4', 'x', etc.) stay accepted by default (#297)."""
+        unrecognized model ID.  Generic client placeholders ('gpt-4', 'x', etc.) and the loaded model's family base
+        alias (e.g. 'hy4-flash' when serving 'hy4-flash-sq-64') stay accepted by default (#297)."""
         asked = req.get("model") if isinstance(req, dict) else None
         if not isinstance(asked, str) or not asked.strip():
             return None
@@ -5026,9 +5032,17 @@ class Service:
         names = self.model_names()
         if asked_s in names:
             return None
-        asked_l = asked_s.lower()
-        if asked_l in {n.strip().lower() for n in names if n}:
+        if self.requested_model(asked) is not None:
             return None
+        asked_l = asked_s.lower()
+        loaded_l = {n.strip().lower() for n in names if n}
+        if asked_l in loaded_l:
+            return None
+        if not self.strict_model:
+            if any(n.startswith(asked_l + "-") for n in loaded_l):
+                return None
+            if (self.hy4 and asked_l == "hy4-flash") or (self.inkling and asked_l == "inkling-2-mini"):
+                return None
         is_strata_id = any(asked_l.startswith(p) for p in self._STRATA_MODEL_PREFIXES)
         if not self.strict_model and not is_strata_id:
             return None
@@ -5509,7 +5523,7 @@ class Service:
 
     def set_shared(self, defaults) -> dict:
         """The Chat settings every client gets for what it leaves out; {} / None = clients use their own again."""
-        self.shared = clean_shared_defaults(defaults)
+        self.shared = clean_shared_defaults(defaults, hy4=self.hy4)
         if self.shared_path:
             try:
                 if self.shared:
@@ -6344,6 +6358,15 @@ class Service:
                                  recover=self.tool_call_recovery, declared_only=declared_only,
                                  deferred=deferred or self.undeclared_tool_calls == "call",   # #4622: opt-in, as for a deferred tool
                                  call_format=self.call_format, opened=opened)
+        inkling_special_ids = None
+        if self.inkling and hasattr(parser, "feed_token"):
+            types = getattr(self.tok, "token_types", None)
+            toks = getattr(self.tok, "tokens", None)
+            if types and toks:
+                inkling_special_ids = {
+                    i for i, ty in enumerate(types)
+                    if ty == 3 and i < len(toks) and toks[i] in inkling_dialect.ALL_CHANNEL_TAGS
+                }
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -6578,7 +6601,10 @@ class Service:
                                     break
                                 piece = detok.push(t)
                                 tail = (tail + piece)[-2:]
-                                evs = cut(parser.feed(piece))
+                                if inkling_special_ids is not None:
+                                    evs = cut(parser.feed_token(piece, is_special=(t in inkling_special_ids)))
+                                else:
+                                    evs = cut(parser.feed(piece))
                                 self._note(n, evs, st, rate)
                                 last_print = self._progress(last_print, st=st)
                                 for ev in evs:
@@ -6757,7 +6783,8 @@ class Service:
                                     parser = self.parser_cls(thinking=False, tools=with_history_tools(tools, sampling),
                                                              stream_tools=True, recover=self.tool_call_recovery,
                                                              declared_only=declared_only,
-                                                             deferred=deferred or self.undeclared_tool_calls == "call")
+                                                             deferred=deferred or self.undeclared_tool_calls == "call",
+                                                             call_format=self.call_format, opened=False)
                                     detok, tail, parser_done, force, budget = Detokenizer(self.tok), "", False, None, None
                                     if forced_text:     # a forced call (tool_choice): its opening again, read as
                                         for ev in cut(parser.feed(forced_text)):     # if the model had written it
@@ -7994,6 +8021,7 @@ def make_handler(svc: Service):
                 self.wfile.write(body)
             elif path in ("/health", "/api/health"):
                 self._json(200, {"status": "ok", "max_context": svc.reported_ctx(), "model": svc.model,
+                                 "family": svc.family,
                                  "images": svc.has_vision(), "api_key": bool(svc.api_key),
                                  "image_generation": svc.images is not None, "api_monitor": svc.api_monitor,
                                  "loaded": svc.loaded(), "service": "strata"})
@@ -8206,12 +8234,6 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
-                    model_err = svc.check_model(req)
-                    if model_err is not None:
-                        self._json(404, responses_error_body(model_err["message"], "invalid_request_error",
-                                                             code="model_not_found")
-                                   if path == "/v1/responses" else {"error": model_err})
-                        return
                     self.record = svc.begin_request(path, req)
                     # #38: the request holds its model to its end (no switch comes between its prompt and its answer);
                     # with switch_on_request a request naming another installed model loads it first.  Its client is
@@ -8219,6 +8241,14 @@ def make_handler(svc: Service):
                     self.cancel = threading.Event()
                     self._watch_client(self.cancel)
                     self.held.enter_context(svc.use_model(req.get("model"), self.cancel))
+                    check_model = getattr(svc, "check_model", None)
+                    if callable(check_model):
+                        model_err = check_model(req)
+                        if model_err is not None:
+                            self._json(404, responses_error_body(model_err["message"], "invalid_request_error",
+                                                                 code="model_not_found")
+                                       if path == "/v1/responses" else {"error": model_err})
+                            return
                 if path == "/v1/responses":
                     self._responses(req)
                 elif path.startswith("/slots/"):
@@ -9982,10 +10012,6 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         # the models on strata-poly have no "arch" and keep their own sampling defaults
         svc.model_arch = None if poly_engine(cfg) else cfg.get("arch") or "qwen4exp"
         svc.set_family("hy4" if svc.hy4 else "inkling2" if svc.inkling else None)
-        if svc.hy4:
-            svc._force_text = hy4_dialect.force_text
-        elif svc.inkling:
-            svc._force_text = inkling_dialect.force_text
         requested = cfg.get("parallel")
         if requested is None:
             args = cfg.get("args", [])

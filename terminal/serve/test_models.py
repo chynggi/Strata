@@ -405,12 +405,13 @@ class OnRequest(unittest.TestCase):
     def test_off_everything_is_as_before(self):
         """Without the key, only the current model and its aliases are listed, and it answers any name."""
         context_fields = dict.fromkeys(("max_model_len", "context_length", "max_context_length"), 4096)
+        metadata = {"created": int(self.svc.started_at), "owned_by": "strata"}
         loaded = {"object": "list", "data": [
             {"id": "alpha", "object": "model", "status": {"value": "loaded"}, "meta": {"n_ctx": 4096},
-             **context_fields,
+             **metadata, **context_fields,
              "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "aliases": ["a1"]},
             {"id": "a1", "object": "model", "status": {"value": "loaded"}, "meta": {"n_ctx": 4096},
-             **context_fields,
+             **metadata, **context_fields,
              "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "aliases": ["a1"],
              "alias_of": "alpha"}]}
         self.assertEqual(self.call("/v1/models"), (200, loaded))

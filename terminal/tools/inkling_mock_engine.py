@@ -78,7 +78,7 @@ def main(argv=None) -> int:
     if "--script" in opts:
         data = json.loads(open(opts["--script"], encoding="utf-8").read())
         scripts = data if data and isinstance(data[0], list) else [data]
-    record = open(opts["--record"], "a", encoding="utf-8") if "--record" in opts else None
+    record_path = opts.get("--record")
     caps = caps_of(os.environ)
     batch_info = f" batch_slots={par} slot_read=1" if par > 1 else ""
     say(f"INFO engine=mock-0 arch=inkling2_loop backend=mock build=SQ-20 layers=24 visits=48 "
@@ -90,6 +90,13 @@ def main(argv=None) -> int:
     req_lock = threading.Lock()
     slot_stops: dict[int, threading.Event] = {}
     single_stop = threading.Event()
+
+    def record_command(line):
+        if record_path is not None:
+            # Do not hold the test's log open between requests. The Windows job can
+            # still be stopping this process when the test removes its directory.
+            with open(record_path, "a", encoding="utf-8") as record:
+                record.write(line)
 
     def next_script():
         with req_lock:
@@ -140,9 +147,7 @@ def main(argv=None) -> int:
                 pass
             continue
         if line.startswith("BGEN "):
-            if record:
-                record.write(raw)
-                record.flush()
+            record_command(raw)
             parts = line.split()
             try:
                 slot = int(parts[1])
@@ -161,9 +166,7 @@ def main(argv=None) -> int:
             threading.Thread(target=run_bgen, args=(slot, max_new, ids, images, ev), daemon=True).start()
             continue
         if line.startswith("GEN "):
-            if record:
-                record.write(raw)
-                record.flush()
+            record_command(raw)
             single_stop.clear()
             parts = line.split()
             try:
