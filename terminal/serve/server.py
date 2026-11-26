@@ -2197,6 +2197,9 @@ class StrataEngine:
         keys0 = self.sampling_keys({k: v for k, v in (sampling or {}).items() if k != HOLD_KEY},
                                    hy4=getattr(self, "hy4_engine", False),
                                    inkling=getattr(self, "inkling_engine", False))   # (the hold's key goes on per leg: leg_keys below)
+        # Match the single-request path's last-turn checkpoint for Poly engines.
+        if not getattr(self, "hy4_engine", False):
+            keys0 += self.turn_key(ids)
         # logprobs: only an admission's token can have an LP line here (the slot's "BT" lines carry none), so the
         # server refuses these requests unless max_tokens is 1.  The lines go to the request itself, through its
         # cancel Event: several requests read control lines at once, and the engine's lp_lines is one attribute.

@@ -23,6 +23,13 @@ Strata has three parts:
   `START-HERE.bat` or `setup.sh`, is setup from a source checkout, for developers. The release paths are the
   installer and `strata launch`.
 
+## 포크 전용: Poly 변경 통합
+
+이 포크는 기존에도 PolyStrata 커밋을 그대로 가져오는 대신, 변경을 별도로 검토해
+호환되는 코드만 선별적으로 흡수해 왔다. Poly 리모트를 갱신할 때는 마지막으로 검토한
+리비전 이후의 변경을 살펴보고, 현재 `strata-poly` 빌드 구조와 네이티브 Inkling 경로에
+맞게 필요한 변경을 이식한다.
+
 ## 포크 전용: 소스에서 엔진을 빌드하는 지침
 
 Use this section when asked to build or rebuild an engine from source. The request is for a

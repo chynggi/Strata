@@ -4079,7 +4079,7 @@ class LoadSharedSettings(unittest.TestCase):
         self.assertIn("top_p", said[0])
 
     def test_several_bad_keys_are_each_named(self):
-        got, said = self.load('{"reasoning_effort": "medium", "nope": 1, "top_k": 900}')
+        got, said = self.load('{"reasoning_effort": "medium", "nope": 1, "top_k": -1}')
         self.assertEqual(got, {"reasoning_effort": "medium"})
         self.assertEqual(len(said), 2)
 

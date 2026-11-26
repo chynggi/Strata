@@ -68,6 +68,9 @@ __device__ __forceinline__ int dot4_s8(int w, int a, int acc) {
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1103__) || \
     defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__)
     return __builtin_amdgcn_sudot4(true, w, true, a, acc, false);
+#elif defined(__gfx1010__)
+    // Navi 10 has no dot instructions: the shared dp4a (SDWA sequence).
+    return __dp4a(w, a, acc);
 #else
     return __builtin_amdgcn_sdot4(w, a, acc, false);
 #endif

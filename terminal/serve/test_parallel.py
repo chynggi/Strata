@@ -104,6 +104,8 @@ def window():        # one batch window: every active slot one token
     if "--fake-stage-sample" in args and processed and not active:
         print("PSTAT 4 20000 16000 14000 12000 10000", flush=True)
 log = open(args[args.index("--log") + 1], "a") if "--log" in args else None
+# --rawlog PATH: every GEN / BGEN line as the server sent it (its keys, e.g. turn_at)
+rawlog = open(args[args.index("--rawlog") + 1], "a") if "--rawlog" in args else None
 PPK = int(args[args.index("--pp-every") + 1]) if "--pp-every" in args else 1
 READF = "--readfield" in args   # DONE's 15th field: the prompt tokens the engine read (a continued prompt: the 1 it copies)
 REUSE = "--reuse" in args     # DONE's reused field as the engine gives it: a continued prompt is all held but its last
@@ -125,6 +127,8 @@ while True:
             stopped.add(b)
         continue
     if line.startswith(("GEN ", "BGEN ")):
+        if rawlog:
+            rawlog.write(line + "\n"); rawlog.flush()
         f = line.split()
         slot = int(f[1]) if f[0] == "BGEN" else None
         max_new = int(f[2] if f[0] == "BGEN" else f[1])
@@ -1315,6 +1319,39 @@ class EngineOwnedDefaults(unittest.TestCase):
         env = self.env_for({"parallel": 8, "args": [], "env": {"STRATA_BATCH_GDN_GROUPS": "0"}}, {"STRATA_CKPT_POOL": "0"})
         self.assertEqual(env["STRATA_BATCH_GDN_GROUPS"], "0")
         self.assertEqual(env["STRATA_CKPT_POOL"], "0")
+
+
+class SlotTurnAt(FakeEngineCase):
+    """With batch slots every GEN and BGEN names the prompt's last turn (turn_at), as one request's GEN does: the
+    engine reads a prompt in calls that stop there, and Inkling 2's greedy answer depends on that grouping."""
+
+    def raw(self):
+        return [line.split() for line in self.rawlog.read_text().splitlines()]
+
+    def start_raw(self, slots):
+        self.rawlog = Path(tempfile.mkdtemp()) / "raw.log"
+        self.addCleanup(lambda: self.rawlog.parent.exists() and __import__("shutil").rmtree(self.rawlog.parent))
+        self.start(slots, more=("--rawlog", str(self.rawlog)))
+        self.engine.poly_engine = True
+
+    def expected(self, f):
+        return self.engine.turn_key([int(x) for x in f[-1].split(",")]).strip()
+
+    def test_a_request_alone_carries_turn_at(self):
+        self.start_raw(2)
+        self.chat("hello there", max_tokens=8)
+        (f,) = self.raw()
+        self.assertEqual(f[0], "GEN", f)
+        self.assertTrue(self.expected(f).startswith("turn_at="), "the template's turn opener is in the prompt")
+        self.assertIn(self.expected(f), f)
+
+    def test_admissions_carry_turn_at(self):
+        self.start_raw(2)
+        BatchLegAccounting.queued_chats(self)   # two requests waiting at once: both go to slots
+        bgen = [f for f in self.raw() if f[0] == "BGEN"]
+        self.assertGreaterEqual(len(bgen), 2, self.raw())
+        for f in bgen:
+            self.assertIn(self.expected(f), f)
 
 
 if __name__ == "__main__":
