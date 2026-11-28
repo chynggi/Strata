@@ -119,8 +119,8 @@ def verdict(fp: dict, table: dict) -> tuple[str, str]:
     if fp["arch"] in PREVIEW_ARCHS:
         return "family", (f"{PREVIEW_ARCHS[fp['arch']]} (architecture {fp['arch']!r}): Strata runs it on its own "
                           "engine path in the NVIDIA (CUDA) and AMD (HIP) builds, not yet on Intel Arc (SYCL); setup "
-                          "installs it with --family qwen36, and with --family qwen36poly on the strata-poly "
-                          "engine")
+                          "installs it with --family qwen36 or --family ornith-native; the fork also offers "
+                          "--family qwen36poly and --family ornith on the strata-poly engine")
     if fp["arch"] in POLY_ARCHS:
         return "family", (f"{POLY_ARCHS[fp['arch']]} (architecture {fp['arch']!r}): Strata runs it on the "
                           "strata-poly engine; give its folder with --gguf-dir")

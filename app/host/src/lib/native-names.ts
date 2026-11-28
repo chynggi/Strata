@@ -2,7 +2,7 @@
  * A short name for a downloaded optimized model: the family and the quantization ("Swift IQ2_XS", "Gyro-S", "IQ3_S"), made from the id the
  * installation gives it (the family tag in front of the lower-cased quantization). The long name stays available as a tooltip.
  */
-const FAMILIES: [string, string][] = [['swift-', 'Swift'], ['coder-', 'Coder'], ['unsloth-', 'Unsloth'], ['gyro-gyro-', 'Gyro'], ['gyro-', 'Gyro'], ['nvfp4-', 'NVFP4'], ['qwen36-', 'Qwen3.6'], ['hy4-flash-', 'Hy4-Flash'], ['inkling-2-mini-', 'Inkling-2-Mini'],
+const FAMILIES: [string, string][] = [['swift-', 'Swift'], ['coder-', 'Coder'], ['unsloth-', 'Unsloth'], ['gyro-gyro-', 'Gyro'], ['gyro-', 'Gyro'], ['nvfp4-', 'NVFP4'], ['qwen36-', 'Qwen3.6'], ['ornith-1.5-35b-a3b-', 'Ornith'], ['hy4-flash-', 'Hy4-Flash'], ['inkling-2-mini-', 'Inkling-2-Mini'],
   ['orca-', 'OrcaRouter'], ['mrad-', 'mradermacher'], ['rvn-', 'RVN'],   // the fork's uncensored families (docs/FORK.md)
   // the fork's strata-poly families (setup.py FAMILIES "tag", from PolyStrata): Ornith 122B before Ornith
   ['glm-', 'GLM 5.3 Flash'], ['lfm25-', 'LFM2.5'], ['flint-', 'Flint'], ['kolibri1-', 'Kolibri 1'], ['qwen36p-', 'Qwen3.6 (strata-poly)'],
