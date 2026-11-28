@@ -6641,7 +6641,7 @@ def build_engine_hip(gpu, llama, vision="none", portable=False) -> Path:
                  "-DSTRATA_Q6K_EXPERTS=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  f"-DCMAKE_HIP_COMPILER={rocm_clang(root)}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
-                 f"-DCMAKE_HIP_FLAGS=-isystem {root}/include --rocm-path={root} --rocm-device-lib-path={bitcode}",
+                 f'-DCMAKE_HIP_FLAGS=-isystem "{root}/include" --rocm-path="{root}" --rocm-device-lib-path="{bitcode}"',
                  f"-DSTRATA_PORTABLE={'ON' if portable else 'OFF'}",
                  *ggml_defs(llama), *isa_floor_defs(floor, ROOT / "build-hip", meta)], None, "")
     if stale_binary(ROOT / "build-hip" / EXE):            # #2054: no stamp for a binary of another version
@@ -6717,7 +6717,7 @@ def build_vision_hip(eng: Path, stamp: Path, meta: dict, llama, vsrc, archs: lis
                     ["-DSTRATA_VISION_HIP=ON", "-DSTRATA_VISION_HIP_ARCHS=" + ";".join(archs),
                      "-DSTRATA_PORTABLE=OFF", f"-DCMAKE_HIP_COMPILER={rocm_clang(root)}",
                      f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}", "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
-                     f"-DCMAKE_HIP_FLAGS=-isystem {root}/include --rocm-path={root} --rocm-device-lib-path={bitcode}"], None, "")
+                     f'-DCMAKE_HIP_FLAGS=-isystem "{root}/include" --rocm-path="{root}" --rocm-device-lib-path="{bitcode}"'], None, "")
         shutil.copy2(ROOT / "build-vision-hip" / "bin" / HVEXE, eng / HVEXE)
     except SystemExit:
         raise
@@ -7758,6 +7758,11 @@ def forward_slash_defs(defs, win: bool | None = None) -> list:
     return [d.replace("\\", "/") if win and isinstance(d, str) and d.startswith("-D") else d for d in defs]
 
 
+def bat_arg(value) -> str:
+    """Keep quotes inside CMake definitions when the generated batch file runs."""
+    return subprocess.list2cmdline([str(value)])
+
+
 def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     acquisition.require("a compile (cmake)")
     cmake, ninja = ensure_build_tools()
@@ -7776,7 +7781,7 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
                  "install Visual Studio 2022 Build Tools (workload 'Desktop development with C++'), then run setup again; a ready-made engine "
                  "needs no compiler: `strata update` fetches it")
         bat = ROOT / bat_name
-        q = lambda c: " ".join(f'"{x}"' if " " in str(x) else str(x) for x in c)  # noqa: E731
+        q = lambda c: " ".join(bat_arg(x) for x in c)  # noqa: E731
         bat.write_bytes((f'@echo off\r\ncall "{vcvars}"{vcvars_toolset(vcvars)} >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
                          f'echo   (the build stopped - trying it once more)\r\n{q(build)} || exit /b 1\r\n').encode("utf-8"))
         # bytes, not text: the \r\n is written here, and text mode on Windows would turn each one into \r\r\n (#1939)
@@ -10142,10 +10147,15 @@ DISPLAY_RESERVE_MIB = 1500     # #779: the tip for an NVIDIA card that also driv
 DESKTOP_RESERVE_MIB = 3072     # #560 #516: what kept a KDE/Wayland desktop alive beside a full expert cache
 
 
-def linux_desktop(env=None) -> bool:
-    """A graphical session on Linux (Wayland or X)."""
+def linux_desktop(env=None, release=None) -> bool:
+    """A graphical session on Linux (Wayland or X).  Not under WSL (WSL_DISTRO_NAME, or is_wsl()'s Microsoft kernel release):
+    WSLg sets DISPLAY there, but the desktop is Windows', which pages VRAM out instead (no #560 #516 OOM)."""
     env = os.environ if env is None else env
-    return sys.platform.startswith("linux") and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+    if not (sys.platform.startswith("linux") and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))):
+        return False
+    if env.get("WSL_DISTRO_NAME"):
+        return False
+    return not (is_wsl() if release is None else "microsoft" in str(release).lower())
 
 
 def desktop_reserve_note() -> list[str]:
@@ -10714,7 +10724,7 @@ def build_engine_poly_hip(gpu, llama, portable=False) -> Path:
                  "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
-                 f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
+                 f'-DCMAKE_HIP_FLAGS=--rocm-path="{root}" --rocm-device-lib-path="{bitcode}"',
                  "-DSTRATA_BUILD_POLY=ON", f"-DSTRATA_GGML_DIR={llama}"], None, "")
     shutil.copy2(ROOT / "build-poly-hip" / POLY_EXE, eng / POLY_EXE)
     stamp.write_text(json.dumps({"source": "local-hip", "backend": "hip", "version": source_version(),
@@ -10765,7 +10775,7 @@ def build_engine_poly_hip_win(gpu, llama, portable=False) -> Path:
                  f"-DCMAKE_CXX_COMPILER={rocm}/lib/llvm/bin/clang++.exe",
                  f"-DCMAKE_HIP_COMPILER={rocm}/lib/llvm/bin/clang++.exe",
                  f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={rocm}", f"-DCMAKE_PREFIX_PATH={rocm}",
-                 f"-DCMAKE_HIP_FLAGS=--rocm-path={rocm} --rocm-device-lib-path={bitcode}",
+                 f'-DCMAKE_HIP_FLAGS=--rocm-path="{rocm}" --rocm-device-lib-path="{bitcode}"',
                  "-DSTRATA_BUILD_POLY=ON", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata-poly-hip.bat")
     shutil.copy2(bdir / POLY_EXE, eng / POLY_EXE)
     # the DLLs, the GEMM kernels and the .kpack files rocBLAS finds beside its DLL come from the ready-made main

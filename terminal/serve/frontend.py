@@ -1852,6 +1852,10 @@ def parse_glm_tool_call(body: str, schema: dict | None = None) -> ToolCall:
 # <|"|> tokens, a number, true, false, null, a {key:value} mapping or a [value] list (its chat template's
 # format_argument; llama.cpp's common/parsers/gemma4.cpp reads the same).
 GEMMA_CALL, GEMMA_CALL_END, GEMMA_QUOTE = "<|tool_call>", "<tool_call|>", '<|"|>'
+GEMMA_THOUGHT_PREFIX = "<|channel>thought"
+# Control tokens that never belong in Gemma answer content when emitted outside a valid channel or tool call.
+GEMMA_NOISE = ("<|channel>", "<channel|>", GEMMA_CALL_END, "<|turn>", "<turn|>",
+               "<|tool_response>", "<tool_response|>", "<|think|>", "<|tool>", "<tool|>")
 
 
 def gemma_call_name(text: str) -> str | None:
@@ -2090,8 +2094,9 @@ class OutputParser:
                                            "dsml": (DSML_INVOKE, DSML_INVOKE_END),
                                            "lfm2": (LFM2_CALL, LFM2_CALL_END)}.get(call_format,
                                                                                    (CALL_START, CALL_END))
-        # tags around the calls that are neither a call nor content (DeepSeek V4's block of calls)
-        self.noise = DSML_BLOCK if call_format == "dsml" else ()
+        # tags around the calls that are neither a call nor content (DeepSeek V4's block of calls; Gemma's stray control tokens)
+        self.call_format = call_format
+        self.noise = DSML_BLOCK if call_format == "dsml" else GEMMA_NOISE if call_format == "gemma" else ()
         # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; the others' reasoning
         # is opened by the prompt and ends with </think>.  `opened`: this prompt ended on Gemma's opening (its
         # template writes it after a tool's answer), so the reply starts inside the reasoning.  GLM's calls come
@@ -2996,11 +3001,30 @@ class OutputParser:
                     if self.buf.startswith(self.think_open):
                         self.buf, self.state, self.opening = self.buf[len(self.think_open):], "reasoning", False
                         continue
+                    if self.call_format == "gemma" and self.buf.startswith(GEMMA_THOUGHT_PREFIX):
+                        rest = self.buf[len(GEMMA_THOUGHT_PREFIX):]
+                        if not rest:
+                            return out
+                        if rest.startswith("<"):
+                            if rest.startswith(self.think_end):
+                                self.buf, self.opening, self.lead = rest[len(self.think_end):], False, True
+                                continue
+                            if self.think_end.startswith(rest):
+                                return out
+                            # malformed thought opener followed straight by another control token (e.g. <|channel>thought<tool_call|>)
+                            self.buf, self.opening, self.lead = rest, False, True
+                            continue
+                        self.buf, self.state, self.opening = rest, "reasoning", False
+                        continue
                     if self.think_open.startswith(self.buf):
                         return out
                     self.opening = False
-                for tag in self.noise:
-                    self.buf = self.buf.replace(tag, "")
+                if self.noise:
+                    cut = self.buf.find(self.call_start)
+                    head = self.buf[:cut] if cut >= 0 else self.buf
+                    for tag in self.noise:
+                        head = head.replace(tag, "")
+                    self.buf = head + self.buf[cut:] if cut >= 0 else head
                 if self.lead:                                   # newlines right after </think> or a call
                     stripped = self.buf.lstrip("\n")
                     if not stripped:
@@ -3374,6 +3398,11 @@ class OutputParser:
             return out
         if self.state == "reasoning" and self.buf == self.think_end:   # the output ends on a held end: its end
             self.buf, self.state = "", "content"
+        if self.state == "content" and self.call_format == "gemma":
+            if self.opening and self.buf == GEMMA_THOUGHT_PREFIX:
+                self.buf = ""
+            for tag in self.noise:
+                self.buf = self.buf.replace(tag, "")
         if self.buf:
             # an unfinished call inside the reasoning (#804) is reasoning text, never a call
             kind = {"reasoning": "reasoning", "rcall": "reasoning", "content": "content"}.get(self.state, "content")

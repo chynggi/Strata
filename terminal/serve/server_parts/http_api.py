@@ -116,10 +116,23 @@ DESKTOP_FREE_MIB = 2048          # #560 #516: below this, an AMD card that also 
 DESKTOP_RESERVE_MIB = 3072       # what kept KDE/Wayland alive beside a full expert cache in both reports
 
 
-def linux_desktop(env=None) -> bool:
-    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has."""
+def under_wsl(env=None, release=None) -> bool:
+    """Linux under WSL: WSL_DISTRO_NAME is set, or the kernel's release (/proc/sys/kernel/osrelease) names Microsoft's."""
     env = os.environ if env is None else env
-    return os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+    if env.get("WSL_DISTRO_NAME"):
+        return True
+    if release is None:
+        release = os.uname().release if hasattr(os, "uname") else ""
+    return "microsoft" in str(release).lower()
+
+
+def linux_desktop(env=None, release=None) -> bool:
+    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has.
+    Not under WSL: WSLg sets DISPLAY and WAYLAND_DISPLAY there, but the desktop is Windows', whose driver pages a
+    process's VRAM out under pressure; there is no amdgpu eviction to system RAM and no OOM killer for #560 #516."""
+    env = os.environ if env is None else env
+    return (os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+            and not under_wsl(env, release))
 
 
 def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
