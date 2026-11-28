@@ -250,6 +250,13 @@ class Order(unittest.TestCase):
         for ram in (16.0, 64.0, 256.0):
             self.assertEqual([x["model"] for x in self._ink_sizes(self._strata(), ram)], list(OFFERED))
 
+    def test_a_legacy_quant_is_listed_with_a_linux_config_name(self):
+        from tools import strata_mcp as M
+        with mock.patch.object(M, "CFG_PREFIX", "linux-"):
+            sizes = self._ink_sizes(self._strata(["linux-inkling-2-mini-ud-iq3_xxs"]))
+        self.assertEqual([x["model"] for x in sizes], [*OFFERED, "UD-IQ3_XXS"])
+        self.assertTrue(sizes[-1]["installed"])
+
     def test_the_recommendation_is_never_a_legacy_quant(self):
         s = self._strata(["inkling-2-mini-ud-q8_k_xl"])
         for ram in (16.0, 64.0):

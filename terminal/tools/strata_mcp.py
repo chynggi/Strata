@@ -930,7 +930,7 @@ class Strata:
         if own:
             out = list(own["models"])
             if own.get("legacy_models"):                # Inkling-2-Mini: a quant that is no longer offered stays in the list while it is installed (never deleted, never recommended)
-                have = {c.stem[len("strata-"):] for c in self.configs()}
+                have = {self.base_tag(self.config_tag(c)) for c in self.configs()}
                 out += [m for m in own["legacy_models"] if (own.get("tag", "") + m).lower() in have]
             return out
         sizes = self.size_table(models, family)
