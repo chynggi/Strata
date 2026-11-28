@@ -337,8 +337,10 @@ class CustomModelScreenTests(Base):
             with self.subTest(spec_id(spec)):
                 lay = Layout(self.home, spec)
 
-                async def case(app, pilot, ctx, spec=spec):
+                async def case(app, pilot, ctx, spec=spec, lay=lay):
                     await press(pilot, "enter")
+                    app.screen.menu().select((spec["key"], spec["base"], lay.tag))
+                    await pilot.pause(0.1)
                     t = flat(app)
                     self.assertIn("Which model?", t)
                     self.assertIn(LABEL, t)
